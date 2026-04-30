@@ -1,0 +1,21 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*~
+.vscode/
+.idea/
+
+# Local server logs
+*.log
+
+# Bundles
+*.zip
+*.tar.gz
+
+# Backup copies of audio assets used during local debugging
+assets/audio-data.js
+assets/Audio/
+assets/Not A Loan.mp3
+assets/Select Screen 2.mp3
