@@ -1121,6 +1121,29 @@ function deriveCardDamage(card) {
 // rare: 2-energy power cards, signature-tier conditional/scaling effects, big perRevealedBonus
 // uncommon: conditional mods, per-X scaling mods, draw+mod hybrids
 // common: vanilla reveals, basic risk/factor mods, simple tempo
+// === Run history (localStorage-backed) ===
+// Persists a summary of every completed run for the Profile screen. Capped at 200 entries
+// so localStorage stays manageable. Wrapped in try/catch for private-mode browsers.
+const RUN_HISTORY_KEY = 'uw_run_history';
+function loadRunHistory() {
+  try {
+    const raw = localStorage.getItem(RUN_HISTORY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+function appendRunHistory(run) {
+  try {
+    const arr = loadRunHistory();
+    arr.push(run);
+    localStorage.setItem(RUN_HISTORY_KEY, JSON.stringify(arr.slice(-200)));
+  } catch (e) {}
+}
+function clearRunHistory() {
+  try { localStorage.removeItem(RUN_HISTORY_KEY); } catch (e) {}
+}
+
 function getCardTier(card) {
   if (!card) return 'common';
   if (card.energy >= 2) return 'rare';
@@ -2052,6 +2075,8 @@ function UnderwritersGambit() {
   const [clearedDeals, setClearedDeals] = useState([]);
   // Optional scam-file mini-boss — rolled at intermission, surfaces an Investigate button.
   const [scamFileAvailable, setScamFileAvailable] = useState(false);
+  // Per-run counters surfaced on the Profile screen after a run ends.
+  const [runStats, setRunStats] = useState({ cleared: 0, defaulted: 0, declined: 0 });
   // Combat state — turn counter and player block. Block soaks the file's next attack and resets each turn.
   const [currentTurn, setCurrentTurn] = useState(1);
   const [playerBlock, setPlayerBlock] = useState(0);
@@ -2076,6 +2101,32 @@ function UnderwritersGambit() {
     if (gameState !== 'INTERMISSION') return;
     setScamFileAvailable(day >= 2 && day < FINAL_BOSS_DAY && Math.random() < 0.30);
   }, [gameState, day]);
+
+  // When a run ends, write a summary to localStorage for the Profile screen.
+  // Guarded by selectedUnderwriter so the initial GAMEOVER from a fresh page (which shouldn't happen) doesn't write a phantom run.
+  const runSavedRef = useRef(null);
+  useEffect(() => {
+    if (gameState !== 'GAMEOVER') return;
+    if (!selectedUnderwriter) return;
+    // Each run has a unique key; using day+commission+capital is enough to dedupe between strict-mode double-effects.
+    const key = `${selectedUnderwriter}|${day}|${capital}|${commission}`;
+    if (runSavedRef.current === key) return;
+    runSavedRef.current = key;
+    appendRunHistory({
+      id: 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+      ts: Date.now(),
+      underwriter: selectedUnderwriter,
+      daysSurvived: day,
+      finalCapital: capital,
+      commission,
+      outcome: (capital > 0 && day >= PROMOTION_DAY) ? 'promoted' : 'wiped',
+      cleared: runStats.cleared,
+      defaulted: runStats.defaulted,
+      declined: runStats.declined,
+      relics: relics.length,
+      deckSize: deck.length,
+    });
+  }, [gameState, selectedUnderwriter, day, capital, commission, runStats, relics, deck]);
 
   // === Audio system ===
   // One imperatively-managed Audio element. Track is chosen by gameState; loops while on screen.
@@ -2237,6 +2288,7 @@ function UnderwritersGambit() {
     setPendingConsumables([]);
     setLastClearedDeal(null);
     setClearedDeals([]);
+    setRunStats({ cleared: 0, defaulted: 0, declined: 0 });
     setLastOutcome(null);
     setSelectedUnderwriter(null);
     setGameState('CHARACTER_SELECT');
@@ -2477,6 +2529,7 @@ function UnderwritersGambit() {
     const burnerBonus = relics.includes('r_burner') ? 300 : 0;
     const total = burnerBonus + cardBonus;
     if (total) setCommission((c) => c + total);
+    setRunStats((s) => ({ ...s, declined: s.declined + 1 }));
     const parts = [];
     if (cardBonus)   parts.push(`card +$${cardBonus}`);
     if (burnerBonus) parts.push(`burner +$${burnerBonus}`);
@@ -2563,6 +2616,7 @@ function UnderwritersGambit() {
     const summary = `${formatMoney(advance)} @ ${finalFactor.toFixed(2)}× / ${offerParams.termDays}d / ${Math.round(offerParams.holdbackPct * 100)}% holdback`;
 
     if (band.isDefault) {
+      setRunStats((s) => ({ ...s, defaulted: s.defaulted + 1 }));
       // Premium Security relic adds +0.25 to recovery (capped at 1.0)
       const baseRec = band.recovery;
       const relicBoost = relics.includes('r_security') ? 0.25 : 0;
@@ -2582,6 +2636,7 @@ function UnderwritersGambit() {
       });
       endEncounter(-netLoss, null);
     } else {
+      setRunStats((s) => ({ ...s, cleared: s.cleared + 1 }));
       const profit = Math.floor(idealProfit * band.profitMult);
       setLastOutcome({
         type: band.id,
@@ -2939,8 +2994,8 @@ function UnderwritersGambit() {
   if (gameState === 'MENU') {
     // Click handler stubs — START routes to character select; the rest are placeholders
     // until the corresponding screens land. EXIT does the only sensible web thing: navigate away.
-    const handleProfile = () => alert('Profile screen — coming soon. Will show run history, win streak, per-underwriter stats.');
-    const handleOptions = () => alert('Options screen — coming soon. Will cover audio, difficulty modifiers, color blind mode.');
+    const handleProfile = () => setGameState('PROFILE');
+    const handleOptions = () => setGameState('OPTIONS');
     const handleExit    = () => { if (confirm('Exit Gambit?')) window.close(); };
     // The image's baked-in title would clash with our HTML title once loaded — only show HTML title until image arrives.
     const showHtmlTitle = bgImgLoaded !== true;
@@ -3058,6 +3113,194 @@ function UnderwritersGambit() {
           </div>
         </div>
 
+        {globalAudioControlJsx}
+      </div>
+    );
+  }
+
+  if (gameState === 'PROFILE') {
+    const history = loadRunHistory();
+    const totalRuns = history.length;
+    const promotions = history.filter((r) => r.outcome === 'promoted').length;
+    const winRate = totalRuns > 0 ? Math.round((promotions / totalRuns) * 100) : 0;
+    const totalCommission = history.reduce((s, r) => s + (r.commission || 0), 0);
+    const totalCleared   = history.reduce((s, r) => s + (r.cleared || 0), 0);
+    const totalDefaulted = history.reduce((s, r) => s + (r.defaulted || 0), 0);
+    const totalDeclined  = history.reduce((s, r) => s + (r.declined || 0), 0);
+    const perUw = {};
+    history.forEach((r) => {
+      const slot = perUw[r.underwriter] || { runs: 0, wins: 0, bestDay: 0, bestCapital: 0 };
+      slot.runs++;
+      if (r.outcome === 'promoted') slot.wins++;
+      if (r.daysSurvived > slot.bestDay) slot.bestDay = r.daysSurvived;
+      if (r.finalCapital > slot.bestCapital) slot.bestCapital = r.finalCapital;
+      perUw[r.underwriter] = slot;
+    });
+    const recent = [...history].reverse().slice(0, 12);
+    return (
+      <div className="min-h-screen bg-neutral-950 p-4 sm:p-6 text-neutral-200">
+        <div className="max-w-4xl mx-auto">
+          <div className="flex items-center justify-between mb-6 border-b border-neutral-800 pb-4">
+            <div>
+              <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">Underwriter's Gambit</div>
+              <h1 className="text-2xl sm:text-3xl font-black text-white uppercase tracking-tight flex items-center gap-3">
+                <Trophy className="text-emerald-500" /> Profile
+              </h1>
+            </div>
+            <button onClick={() => setGameState('MENU')} className="text-neutral-400 hover:text-white text-xs uppercase tracking-widest font-bold">Back</button>
+          </div>
+
+          {totalRuns === 0 ? (
+            <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-10 text-center">
+              <div className="text-neutral-500 text-sm mb-2">No runs played yet.</div>
+              <button onClick={() => setGameState('MENU')} className="text-emerald-400 hover:text-emerald-300 text-xs uppercase tracking-widest font-bold">Hit Start New Run to begin →</button>
+            </div>
+          ) : (
+            <>
+              {/* Top stats */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800">
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500 mb-1">Total Runs</div>
+                  <div className="text-2xl font-mono font-bold text-white">{totalRuns}</div>
+                </div>
+                <div className="bg-neutral-900 p-4 rounded-xl border border-emerald-900/40">
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-emerald-500 mb-1">VP Promotions</div>
+                  <div className="text-2xl font-mono font-bold text-emerald-400">{promotions}</div>
+                </div>
+                <div className="bg-neutral-900 p-4 rounded-xl border border-neutral-800">
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500 mb-1">Win Rate</div>
+                  <div className="text-2xl font-mono font-bold text-white">{winRate}%</div>
+                </div>
+                <div className="bg-neutral-900 p-4 rounded-xl border border-amber-900/40">
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-amber-500 mb-1">Lifetime Commission</div>
+                  <div className="text-2xl font-mono font-bold text-amber-400">{formatMoney(totalCommission)}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3 mb-6">
+                <div className="bg-neutral-950 p-3 rounded-lg border border-emerald-900/30">
+                  <div className="text-[9px] uppercase tracking-widest text-emerald-500 font-bold">Cleared</div>
+                  <div className="text-xl font-mono font-bold text-emerald-400">{totalCleared}</div>
+                </div>
+                <div className="bg-neutral-950 p-3 rounded-lg border border-red-900/30">
+                  <div className="text-[9px] uppercase tracking-widest text-red-500 font-bold">Defaulted</div>
+                  <div className="text-xl font-mono font-bold text-red-400">{totalDefaulted}</div>
+                </div>
+                <div className="bg-neutral-950 p-3 rounded-lg border border-neutral-800">
+                  <div className="text-[9px] uppercase tracking-widest text-neutral-500 font-bold">Declined</div>
+                  <div className="text-xl font-mono font-bold text-neutral-300">{totalDeclined}</div>
+                </div>
+              </div>
+
+              {/* Per-underwriter */}
+              <h2 className="text-xs uppercase font-black tracking-widest text-neutral-400 mb-2">By Underwriter</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 mb-6">
+                {UNDERWRITERS.map((uw) => {
+                  const s = perUw[uw.id] || { runs: 0, wins: 0, bestDay: 0, bestCapital: 0 };
+                  return (
+                    <div key={uw.id} className="bg-neutral-900 p-3 rounded-lg border border-neutral-800">
+                      <div className="flex items-baseline justify-between mb-2">
+                        <span className="text-sm font-black uppercase text-white">{uw.name}</span>
+                        <span className="text-[9px] uppercase font-bold tracking-widest text-neutral-500">{uw.title}</span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-1.5 text-[10px]">
+                        <div><div className="text-neutral-500 uppercase">Runs</div><div className="font-mono text-neutral-200 font-bold text-base">{s.runs}</div></div>
+                        <div><div className="text-neutral-500 uppercase">Wins</div><div className="font-mono text-emerald-400 font-bold text-base">{s.wins}</div></div>
+                        <div><div className="text-neutral-500 uppercase">Best Day</div><div className="font-mono text-amber-400 font-bold text-base">{s.bestDay || '—'}</div></div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Recent runs */}
+              <h2 className="text-xs uppercase font-black tracking-widest text-neutral-400 mb-2">Recent Runs</h2>
+              <div className="bg-neutral-900 border border-neutral-800 rounded-2xl overflow-hidden">
+                {recent.map((r) => {
+                  const uw = UNDERWRITERS.find((u) => u.id === r.underwriter);
+                  const isWin = r.outcome === 'promoted';
+                  return (
+                    <div key={r.id} className="px-4 py-2.5 border-b border-neutral-800 last:border-0 flex items-center gap-3 text-xs">
+                      <div className="w-12 text-[10px] font-mono text-neutral-500 shrink-0">{new Date(r.ts).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-bold text-neutral-200 truncate">{uw?.name || r.underwriter} <span className="text-neutral-500 font-normal">· {uw?.title || ''}</span></div>
+                      </div>
+                      <div className="text-[10px] font-mono text-neutral-400 hidden sm:block w-16 text-right">Day {r.daysSurvived}</div>
+                      <div className="text-[10px] font-mono text-amber-400 hidden sm:block w-20 text-right">{formatMoney(r.commission)}</div>
+                      <div className={`text-[10px] font-black uppercase tracking-widest w-16 text-right ${isWin ? 'text-emerald-400' : 'text-red-400'}`}>{isWin ? 'VP' : 'WIPED'}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+        {globalAudioControlJsx}
+      </div>
+    );
+  }
+
+  if (gameState === 'OPTIONS') {
+    return (
+      <div className="min-h-screen bg-neutral-950 p-4 sm:p-6 text-neutral-200">
+        <div className="max-w-2xl mx-auto">
+          <div className="flex items-center justify-between mb-6 border-b border-neutral-800 pb-4">
+            <div>
+              <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">Underwriter's Gambit</div>
+              <h1 className="text-2xl sm:text-3xl font-black text-white uppercase tracking-tight flex items-center gap-3">
+                <Settings2 className="text-emerald-500" /> Options
+              </h1>
+            </div>
+            <button onClick={() => setGameState('MENU')} className="text-neutral-400 hover:text-white text-xs uppercase tracking-widest font-bold">Back</button>
+          </div>
+
+          {/* Audio */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 mb-4">
+            <h2 className="text-xs uppercase font-black tracking-widest text-emerald-400 mb-3 flex items-center gap-2">
+              <Volume2 size={14} /> Audio
+            </h2>
+            <div className="flex items-center gap-4">
+              <button onClick={() => setAudioMuted((m) => !m)} className="bg-neutral-800 hover:bg-neutral-700 border border-neutral-700 text-white p-3 rounded-lg" aria-label={audioMuted ? 'Unmute' : 'Mute'}>
+                {audioMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+              </button>
+              <div className="flex-1">
+                <div className="flex justify-between mb-1">
+                  <span className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">Master Volume</span>
+                  <span className="text-[10px] font-mono text-neutral-300">{Math.round((audioMuted ? 0 : audioVolume) * 100)}%</span>
+                </div>
+                <input type="range" min="0" max="100" value={Math.round(audioVolume * 100)}
+                  onChange={(e) => { setAudioVolume(parseFloat(e.target.value) / 100); if (audioMuted) setAudioMuted(false); }}
+                  className="w-full accent-purple-500" />
+              </div>
+            </div>
+            <p className="text-[11px] text-neutral-500 mt-3 leading-relaxed">Settings persist across sessions via localStorage.</p>
+          </div>
+
+          {/* Profile data */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5 mb-4">
+            <h2 className="text-xs uppercase font-black tracking-widest text-amber-400 mb-3">Profile Data</h2>
+            <button
+              onClick={() => {
+                if (window.confirm('Wipe all run history? This cannot be undone.')) {
+                  clearRunHistory();
+                  alert('Profile reset.');
+                }
+              }}
+              className="bg-red-950/40 hover:bg-red-900/50 border border-red-900/50 text-red-300 hover:text-red-200 px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-widest transition-colors">
+              Reset Profile Data
+            </button>
+            <p className="text-[11px] text-neutral-500 mt-3 leading-relaxed">Clears your run history (wins, losses, lifetime commission). Audio settings keep their current values.</p>
+          </div>
+
+          {/* About */}
+          <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-5">
+            <h2 className="text-xs uppercase font-black tracking-widest text-neutral-400 mb-3">About</h2>
+            <div className="space-y-1.5 text-xs text-neutral-400">
+              <div><strong className="text-white">Underwriter's Gambit</strong> — A roguelite deckbuilder for MCA underwriters.</div>
+              <div>Source: <a href="https://github.com/Vaddix123/underwriters-gambit" target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:underline">github.com/Vaddix123/underwriters-gambit</a></div>
+              <div>Runs locally — no analytics, no telemetry, no account.</div>
+            </div>
+          </div>
+        </div>
         {globalAudioControlJsx}
       </div>
     );
