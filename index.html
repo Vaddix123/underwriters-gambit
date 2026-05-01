@@ -854,23 +854,31 @@ const ALEXANDER_POOL = [
 ];
 
 // === UNDERWRITERS ===
+// `keyword` is the class's mechanical identity — surfaces as a bold colored token on cards
+// from this pool that lean into it, and shows up on character select.
 const UNDERWRITERS = [
   { id: 'branden',  name: 'Branden',  title: 'The Strategist',
+    keyword: 'Hedge',     keywordDesc: 'Hybrid mods that move both Risk and Factor reward you twice. Balance is the play.',
     blurb: 'Planner. Hybrid offense/defense modifiers, scaling reads, steady compounding gains. The desk that ages well.',
     accent: 'indigo', signatureId: 's_branden',  pool: BRANDEN_POOL  },
   { id: 'brendan',  name: 'Brendan',  title: 'The Forensic',
-    blurb: 'Information advantage. Reveal-heavy deck, scaling defenses on visible attrs, anomaly synergy. You see the file before you price it.',
+    keyword: 'Forensic',  keywordDesc: 'Cards gain power for every visible anomaly. Read the file, then price it.',
+    blurb: 'Information advantage. Reveal-heavy deck, scaling defenses on visible attrs, anomaly synergy.',
     accent: 'purple', signatureId: 's_brendan',  pool: BRENDAN_POOL  },
   { id: 'keith',    name: 'Keith',    title: 'The Veteran',
-    blurb: 'Risk-averse. Heavy defensive structuring, decline-with-bonus economy, situational bonuses against bad ISOs and strict states.',
+    keyword: 'Walk',      keywordDesc: 'Decline carries a Clean File buff (−15 Risk) onto the next encounter. Walking is a play.',
+    blurb: 'Risk-averse. Heavy defensive structuring, decline-with-bonus economy, situational bonuses against bad ISOs.',
     accent: 'slate',  signatureId: 's_keith',    pool: KEITH_POOL    },
   { id: 'isaac',    name: 'Isaac',    title: 'The Closer',
-    blurb: 'Yield pump. Heavy factor stacking, conditional spreads at the state cap, push-for-renewal economics. High ceiling, high default odds.',
+    keyword: 'Yield',     keywordDesc: 'Bigger profit on cleared files (+15%), but Capital damage hits +25% harder. Glass cannon.',
+    blurb: 'Yield pump. Heavy factor stacking, conditional spreads at the state cap, push-for-renewal economics.',
     accent: 'red',    signatureId: 's_isaac',    pool: ISAAC_POOL    },
   { id: 'alexander',name: 'Alexander',title: 'The Stacker',
-    blurb: 'Combo / tempo. Cheap E0 cards, draw-heavy chains, modifiers that scale with the stack. Build to a turn where you play five.',
+    keyword: 'Chain',     keywordDesc: 'After 3+ cards played in a turn, the next mod doubles its Risk reduction. Build the combo.',
+    blurb: 'Combo / tempo. Cheap E0 cards, draw-heavy chains, modifiers that scale with the stack.',
     accent: 'cyan',   signatureId: 's_alexander',pool: ALEXANDER_POOL},
   { id: 'stanley',  name: 'Stanley',  title: 'The Hustler',
+    keyword: 'Kickback',  keywordDesc: 'Card commission bonuses still pay on Decline. Walking away is never empty-handed.',
     blurb: 'Commission-grabber. Cards earn cash on the side, declines pay, side gigs and broker kickbacks compound your shop budget.',
     accent: 'amber',  signatureId: 's_stanley',  pool: STANLEY_POOL  },
 ];
@@ -1187,6 +1195,14 @@ function attachCombatStats(file, day, isBoss) {
   const baseHp = 45 + (day - 1) * 5 + Math.floor(file.industry.baseRisk / 2) + isoBump;
   let maxHp = Math.max(30, baseHp);
   let maxTurns = 3;
+  // Risk threshold (StS Block model) — final risk above this = damage to Capital, scaled by advance.
+  // Generous on Day 1, tighter on bosses, brutal on the final.
+  let riskThreshold = isFinal ? 20
+    : (file.isScam        ? 28
+    : (file.isRenewalBoss ? 30
+    : (isBoss             ? 32
+    : (day === 1          ? 40
+    :                       35))));
   let displayName = file.name;
   let abilities;
   if (isFinal) {
@@ -1219,6 +1235,7 @@ function attachCombatStats(file, day, isBoss) {
     abilities,
     intent: pickNextIntent(abilities),
     maxTurns,
+    riskThreshold,
     activeStatuses: [], // for DOT effects like cash_crisis / subprime_slumber
   };
 }
@@ -1786,7 +1803,7 @@ function PreviewStat({ label, value, valueColor }) {
   );
 }
 
-function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, baseRiskBreakdown }) {
+function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, baseRiskBreakdown, selectedUnderwriter, cardsPlayedThisTurn }) {
   const [showBreakdown, setShowBreakdown] = useState(false);
   const factorCap = boss.state.factorCap;
   const baseRiskAccrued = baseRiskBreakdown.reduce((s, p) => s + p.value, 0);
@@ -1863,6 +1880,18 @@ function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, 
   if (boss.maxHp && boss.hp > 0) {
     const pen = Math.round((boss.hp / boss.maxHp) * (boss.isBoss ? 35 : 25));
     if (pen > 0) vitalsParts.push({ label: `Unread file penalty (HP ${boss.hp}/${boss.maxHp})`, value: pen });
+  }
+  // Chain (Alexander): every card past the 3rd played this turn shaves risk off the final read.
+  if (selectedUnderwriter === 'alexander' && cardsPlayedThisTurn >= 3) {
+    const bonus = (cardsPlayedThisTurn - 2) * -3;
+    vitalsParts.push({ label: `Chain bonus (${cardsPlayedThisTurn} cards played)`, value: bonus });
+  }
+  // Hedge (Branden): hybrid mods (both risk-trim AND factor adjustment) get an extra −3 Risk each.
+  if (selectedUnderwriter === 'branden') {
+    const hedgeMods = activeMods.filter((m) => m.risk && m.risk < 0 && m.factor);
+    if (hedgeMods.length > 0) {
+      vitalsParts.push({ label: `Hedge bonus (×${hedgeMods.length} hybrid mods)`, value: hedgeMods.length * -3 });
+    }
   }
   const vitalsRisk = vitalsParts.reduce((s, p) => s + p.value, 0);
 
@@ -1947,31 +1976,33 @@ function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, 
         <PreviewStat label="Daily Pmt" value={formatMoney(dailyDebit)} />
         <PreviewStat label="Est APR"   value={`${Math.round(apr)}%`}   valueColor={aprColor} />
         {(() => {
-          // The visible risk maps to a predicted outcome band so the player can see what they're
-          // heading into BEFORE submitting. Volatility (±industryVol/2) can shift one band either way,
-          // and there's a hidden actualBaseRisk delta from unrevealed attrs — surfaced as +/- bracket.
-          const predicted = classifyRiskBand(visibleRisk);
-          const toneClass = predicted.tone === 'emerald' ? 'text-emerald-400'
-            : predicted.tone === 'amber' ? 'text-amber-400'
-            : 'text-red-400';
-          const borderClass = predicted.tone === 'emerald' ? 'border-emerald-900/50'
-            : predicted.tone === 'amber' ? 'border-amber-900/50'
-            : 'border-red-900/50';
-          const volBuf = Math.round(boss.industry.volMultiplier / 2);
+          // Risk-as-damage preview (StS Block). Above-threshold risk = projected Capital damage.
+          // The number IS the math — every point of mitigation is one point off the damage roll.
+          const threshold = boss.riskThreshold || 35;
+          const riskOver = Math.max(0, visibleRisk - threshold);
+          const projectedDamage = riskOver > 0 ? Math.floor((riskOver / 100) * advance) : 0;
+          const tone = riskOver === 0    ? 'emerald'
+                      : riskOver <= 15   ? 'emerald'
+                      : riskOver <= 30   ? 'amber'
+                      :                    'red';
+          const toneText   = tone === 'emerald' ? 'text-emerald-400' : tone === 'amber' ? 'text-amber-400' : 'text-red-400';
+          const toneBorder = tone === 'emerald' ? 'border-emerald-900/50' : tone === 'amber' ? 'border-amber-900/50' : 'border-red-900/50';
           return (
             <button
               onClick={() => setShowBreakdown((s) => !s)}
-              className={`bg-neutral-950/60 px-2 py-1.5 rounded border ${borderClass} text-left hover:border-neutral-600 transition-colors`}
-              title="Click to see where every point of risk is coming from. Outcome is read off this number, not rolled."
+              className={`bg-neutral-950/60 px-2 py-1.5 rounded border ${toneBorder} text-left hover:border-neutral-600 transition-colors`}
+              title={`Risk above the file's threshold becomes Capital damage on submit. Mitigation is real — every point shaved is one point off the damage. Click for breakdown.`}
             >
               <div className="text-[9px] uppercase tracking-widest text-neutral-500 font-bold leading-tight flex items-center gap-1">
-                Risk &amp; Band <Info size={9} className="opacity-60" />
+                Risk / Thresh <Info size={9} className="opacity-60" />
               </div>
-              <div className="flex items-baseline gap-1.5 mt-0.5">
+              <div className="flex items-baseline gap-1 mt-0.5">
                 <span className={`text-sm font-mono font-bold leading-tight ${riskColor}`}>{visibleRisk}</span>
-                <span className={`text-[9px] font-mono uppercase tracking-widest ${toneClass}`}>±{volBuf}</span>
+                <span className="text-[10px] font-mono text-neutral-500">/{threshold}</span>
               </div>
-              <div className={`text-[10px] font-bold uppercase tracking-wider leading-tight ${toneClass}`}>{predicted.name}</div>
+              <div className={`text-[10px] font-bold leading-tight ${toneText}`}>
+                {riskOver === 0 ? 'CLEAN' : `−${formatMoney(projectedDamage)}`}
+              </div>
             </button>
           );
         })()}
@@ -2077,6 +2108,12 @@ function UnderwritersGambit() {
   const [scamFileAvailable, setScamFileAvailable] = useState(false);
   // Per-run counters surfaced on the Profile screen after a run ends.
   const [runStats, setRunStats] = useState({ cleared: 0, defaulted: 0, declined: 0 });
+  // Walk keyword (Keith): a Decline stamps a Clean File buff onto the next encounter (-N Risk).
+  // Carries through one encounter, applied + cleared in startEncounter.
+  const [cleanFileBuff, setCleanFileBuff] = useState(0);
+  // Chain keyword (Alexander): every card played in a turn raises the multiplier on the next
+  // played mod. Tracked per-turn, reset on endTurn / new encounter.
+  const [cardsPlayedThisTurn, setCardsPlayedThisTurn] = useState(0);
   // Combat state — turn counter and player block. Block soaks the file's next attack and resets each turn.
   const [currentTurn, setCurrentTurn] = useState(1);
   const [playerBlock, setPlayerBlock] = useState(0);
@@ -2289,6 +2326,8 @@ function UnderwritersGambit() {
     setLastClearedDeal(null);
     setClearedDeals([]);
     setRunStats({ cleared: 0, defaulted: 0, declined: 0 });
+    setCleanFileBuff(0);
+    setCardsPlayedThisTurn(0);
     setLastOutcome(null);
     setSelectedUnderwriter(null);
     setGameState('CHARACTER_SELECT');
@@ -2328,6 +2367,14 @@ function UnderwritersGambit() {
     });
     if (forensicHidden) newBoss.forgedDocs = true;
 
+    // Walk keyword: if a Clean File buff is queued (from a previous Decline), bake it directly
+    // into the boss's risk so it shows in the breakdown and reduces final-risk identically.
+    if (cleanFileBuff > 0 && newBoss) {
+      newBoss.actualBaseRisk = (newBoss.actualBaseRisk || 0) - cleanFileBuff;
+      newBoss.baseRiskBeforeAnomalies = (newBoss.baseRiskBeforeAnomalies || 0) - cleanFileBuff;
+      newBoss.cleanFileApplied = cleanFileBuff;
+      setCleanFileBuff(0);
+    }
     setBoss(newBoss);
     setActiveMods(preActiveMods);
     setOfferParams({ ...DEFAULT_OFFER });
@@ -2336,6 +2383,7 @@ function UnderwritersGambit() {
     setPendingConsumables([]);
     setCurrentTurn(1);
     setPlayerBlock(0);
+    setCardsPlayedThisTurn(0);
 
     // Energy & hand setup
     const baseEnergy = 3 + (relics.includes('r_intern') ? 1 : 0) + preEnergyBonus;
@@ -2427,6 +2475,7 @@ function UnderwritersGambit() {
     setHand(newHand);
     setDiscardPile((d) => [...d, card]);
     setEnergy((e) => e - card.energy);
+    setCardsPlayedThisTurn((n) => n + 1);
 
     // Apply effects in order: reveals, modifiers, energy, draw, commission bonus, damage, block
     if (card.target) {
@@ -2441,12 +2490,14 @@ function UnderwritersGambit() {
     if (card.draw) {
       drawIntoHand(card.draw);
     }
+    // Kickback (Stanley): all in-encounter commission income scales +50%
+    const kickbackMult = selectedUnderwriter === 'stanley' ? 1.5 : 1;
     if (card.bonus) {
-      setCommission((c) => c + card.bonus);
+      setCommission((c) => c + Math.floor(card.bonus * kickbackMult));
     }
     if (card.perRevealedBonus) {
       // Note: this reads boss BEFORE any reveal this card may have applied (acceptable — reads at play time)
-      setCommission((c) => c + card.perRevealedBonus * countRevealed(boss));
+      setCommission((c) => c + Math.floor(card.perRevealedBonus * countRevealed(boss) * kickbackMult));
     }
 
     // Combat: damage to file, block buff to player. File block soaks damage first (StS-style).
@@ -2513,8 +2564,9 @@ function UnderwritersGambit() {
     // 3) Pick next intent + reset file block (block doesn't carry between turns)
     setBoss((b) => b ? ({ ...b, intent: pickNextIntent(b.abilities), block: 0 }) : b);
 
-    // 4) Reset player block, discard hand, redraw, reset energy
+    // 4) Reset player block, discard hand, redraw, reset energy + per-turn counters
     setPlayerBlock(0);
+    setCardsPlayedThisTurn(0);
     setDiscardPile((d) => [...d, ...hand]);
     setHand([]);
     setCurrentTurn((t) => t + 1);
@@ -2527,8 +2579,12 @@ function UnderwritersGambit() {
   // === Decisions ===
   const executeDecline = (cardBonus = 0) => {
     const burnerBonus = relics.includes('r_burner') ? 300 : 0;
-    const total = burnerBonus + cardBonus;
+    let total = burnerBonus + cardBonus;
+    // Kickback (Stanley): all commission income scales +50%, even on Decline
+    if (selectedUnderwriter === 'stanley') total = Math.floor(total * 1.5);
     if (total) setCommission((c) => c + total);
+    // Walk (Keith): Decline stamps a -15 Risk Clean File buff onto the next encounter
+    if (selectedUnderwriter === 'keith') setCleanFileBuff(15);
     setRunStats((s) => ({ ...s, declined: s.declined + 1 }));
     const parts = [];
     if (cardBonus)   parts.push(`card +$${cardBonus}`);
@@ -2596,62 +2652,79 @@ function UnderwritersGambit() {
       if (leverageOver > 0) vitalsRisk += Math.min(30, Math.round(leverageOver * 100 * 5));
       if (overPull > 0)     vitalsRisk += Math.min(20, 12 + Math.round(overPull * 8));
     }
+    // Chain (Alexander): same per-turn-cards-played multiplier the preview shows
+    if (selectedUnderwriter === 'alexander' && cardsPlayedThisTurn >= 3) {
+      vitalsRisk += (cardsPlayedThisTurn - 2) * -3;
+    }
+    // Hedge (Branden): bonus for hybrid mods (both risk-trim AND factor adjustment)
+    if (selectedUnderwriter === 'branden') {
+      const hedgeCount = activeMods.filter((m) => m.risk && m.risk < 0 && m.factor).length;
+      if (hedgeCount > 0) vitalsRisk += hedgeCount * -3;
+    }
 
     // HP penalty: if the file isn't fully vetted (hp > 0), funding it blind costs you risk.
     // Roughly: +25 risk at full HP, scaling linearly to 0 at HP=0. Boss files hit harder (max +35).
     const hpPenalty = boss.maxHp ? (boss.hp / boss.maxHp) * (boss.isBoss ? 35 : 25) : 0;
 
-    // === Deterministic-with-bounded-volatility outcome ===
-    // Final risk = file truth (actualBaseRisk includes hidden anomaly weight + accumulated file attacks)
-    // + everything the player could see and account for + HP penalty for unfinished read
-    // + a small volatility shock that shifts you within ~one band.
-    const baseFinal = boss.actualBaseRisk + cardRisk + sliderRisk + relicRisk + vitalsRisk + hpPenalty;
-    // Volatility is bounded to ±half industry vol so well-priced files never randomly collapse
-    const volSwing = (Math.random() - 0.5) * boss.industry.volMultiplier;
-    const stressedRisk = Math.max(0, Math.min(120, baseFinal + volSwing));
-    const band = classifyRiskBand(stressedRisk);
+    // === Risk-as-Damage resolution (StS Block model) ===
+    // Pure deterministic: final risk = every visible/hidden source. No volatility shock.
+    // Risk above the file's threshold becomes Capital damage, scaled by advance.
+    // Profit is *always paid* (modulated by tier) — you can clear a file for a profit AND
+    // take damage on the same submit. The deck/term-sheet decisions ARE the mitigation.
+    const finalRisk = Math.max(0, Math.min(120,
+      boss.actualBaseRisk + cardRisk + sliderRisk + relicRisk + vitalsRisk + hpPenalty
+    ));
+    const threshold = boss.riskThreshold || 35;
+    const riskOver = Math.max(0, finalRisk - threshold);
 
     const payback = Math.floor(advance * finalFactor);
     const idealProfit = payback - advance;
-    const summary = `${formatMoney(advance)} @ ${finalFactor.toFixed(2)}× / ${offerParams.termDays}d / ${Math.round(offerParams.holdbackPct * 100)}% holdback`;
 
-    if (band.isDefault) {
-      setRunStats((s) => ({ ...s, defaulted: s.defaulted + 1 }));
-      // Premium Security relic adds +0.25 to recovery (capped at 1.0)
-      const baseRec = band.recovery;
-      const relicBoost = relics.includes('r_security') ? 0.25 : 0;
-      const recoveryRate = Math.min(1, baseRec + relicBoost);
-      const recovered = Math.floor(advance * recoveryRate);
-      const netLoss = advance - recovered;
-      setLastOutcome({
-        type: band.id,
-        bandName: band.name,
-        bandTone: band.tone,
-        profit: -netLoss,
-        msg: `${band.name}. ${band.note}${relicBoost ? ` Premium Security boosted recovery by 25 pp.` : ''} Net: ${formatMoney(-netLoss)}.`,
-        success: false,
-        riskScore: Math.round(stressedRisk),
-        summary,
-        advance,
-      });
-      endEncounter(-netLoss, null);
-    } else {
-      setRunStats((s) => ({ ...s, cleared: s.cleared + 1 }));
-      const profit = Math.floor(idealProfit * band.profitMult);
-      setLastOutcome({
-        type: band.id,
-        bandName: band.name,
-        bandTone: band.tone,
-        profit,
-        msg: `${band.name}. ${band.note} Booked ${formatMoney(profit)} on a ${formatMoney(advance)} advance.`,
-        success: true,
-        riskScore: Math.round(stressedRisk),
-        summary,
-        advance,
-      });
-      const dealSnapshot = { ...boss, lastFactor: finalFactor, lastAdvance: advance };
-      endEncounter(profit, dealSnapshot);
-    }
+    // Profit ladder by how far over the threshold the read landed
+    let profitMult, bandName, bandTone, isCleared;
+    if (riskOver === 0)        { profitMult = 1.10; bandName = 'Clean Clear'; bandTone = 'emerald'; isCleared = true; }
+    else if (riskOver <= 15)   { profitMult = 1.00; bandName = 'Cleared';     bandTone = 'emerald'; isCleared = true; }
+    else if (riskOver <= 30)   { profitMult = 0.65; bandName = 'Stressed';    bandTone = 'amber';   isCleared = true; }
+    else if (riskOver <= 50)   { profitMult = 0.30; bandName = 'Breach';      bandTone = 'red';     isCleared = false; }
+    else                       { profitMult = 0;    bandName = 'Default';     bandTone = 'red';     isCleared = false; }
+
+    // Damage = (riskOver / 100) × advance, capped at advance. Premium Security soaks 25%.
+    let damage = Math.min(advance, Math.floor((riskOver / 100) * advance));
+    const securityRelic = relics.includes('r_security') && damage > 0;
+    const damageReducedBy = securityRelic ? Math.floor(damage * 0.25) : 0;
+    damage = damage - damageReducedBy;
+
+    let profit = Math.floor(idealProfit * profitMult);
+    // Yield (Isaac): glass cannon — +15% profit on cleared files, but +25% damage taken on hits.
+    const isYield = selectedUnderwriter === 'isaac';
+    if (isYield && profit > 0) profit = Math.floor(profit * 1.15);
+    if (isYield && damage > 0) damage = Math.floor(damage * 1.25);
+    const net = profit - damage;
+    const summary = `${formatMoney(advance)} @ ${finalFactor.toFixed(2)}× / ${offerParams.termDays}d / ${Math.round(offerParams.holdbackPct * 100)}% holdback`;
+    const msg = riskOver === 0
+      ? `Clean read. Booked ${formatMoney(profit)} with no Capital damage.`
+      : `Risk ${Math.round(finalRisk)} vs Threshold ${threshold} (${riskOver} over). Booked ${formatMoney(profit)} profit, took ${formatMoney(damage)} Capital damage${damageReducedBy ? ` (Premium Security saved ${formatMoney(damageReducedBy)})` : ''}.`;
+
+    if (isCleared) setRunStats((s) => ({ ...s, cleared: s.cleared + 1 }));
+    else           setRunStats((s) => ({ ...s, defaulted: s.defaulted + 1 }));
+
+    setLastOutcome({
+      type: bandName.toUpperCase().replace(/ /g, '_'),
+      bandName,
+      bandTone,
+      profit: net,
+      grossProfit: profit,
+      damage,
+      threshold,
+      riskOver,
+      riskScore: Math.round(finalRisk),
+      summary,
+      advance,
+      msg,
+      success: isCleared,
+    });
+    const dealSnapshot = isCleared ? { ...boss, lastFactor: finalFactor, lastAdvance: advance } : null;
+    endEncounter(net, dealSnapshot);
   };
 
   // === Encounter resolution ===
@@ -2659,7 +2732,8 @@ function UnderwritersGambit() {
     setCapital((c) => c + delta);
     if (delta > 0) {
       const commissionRate = relics.includes('r_bourbon') ? 0.125 : 0.10;
-      setCommission((c) => c + Math.floor(delta * commissionRate));
+      const kickbackMult = selectedUnderwriter === 'stanley' ? 1.5 : 1;
+      setCommission((c) => c + Math.floor(delta * commissionRate * kickbackMult));
     }
     if (clearedDeal) {
       setLastClearedDeal(clearedDeal);
@@ -2688,7 +2762,10 @@ function UnderwritersGambit() {
     const wasFinal = boss?.isFinalBoss;
     const wasBoss  = boss?.isBoss;   // covers regular bosses, renewal-bosses, and scam files
     const wasScam  = boss?.isScam;
-    if (cleared && wasScam) setCommission((c) => c + 500);
+    if (cleared && wasScam) {
+      const scamBonus = selectedUnderwriter === 'stanley' ? 750 : 500; // Kickback (+50%)
+      setCommission((c) => c + scamBonus);
+    }
 
     let draftSize = 3;
     let rareGuarantees = 0;
@@ -2809,9 +2886,17 @@ function UnderwritersGambit() {
       parts.push({ label: `Top anomaly (Forensic Eye): ${ANOMALY_TYPES[boss.anomalies[0]].label}`, value: ANOMALY_TYPES[boss.anomalies[0]].risk });
     }
     if (boss.isRenewal) parts.push({ label: 'Renewal track-record', value: -20 });
+    if (boss.cleanFileApplied) parts.push({ label: `Clean File buff (Walk)`, value: -boss.cleanFileApplied });
+    // Forensic (Brendan): -2 visible Risk for every anomaly the player can see
+    if (selectedUnderwriter === 'brendan') {
+      const visibleAnoms = boss.anomaliesRevealed
+        ? (boss.anomalies || []).length
+        : (relics.includes('r_forensic') && boss.hidden.bank.revealed && boss.anomalies?.length ? 1 : 0);
+      if (visibleAnoms > 0) parts.push({ label: `Forensic keyword (−2 / anomaly × ${visibleAnoms})`, value: -2 * visibleAnoms });
+    }
     const total = parts.reduce((s, p) => s + p.value, 0);
     return { total, parts };
-  }, [boss, relics, day]);
+  }, [boss, relics, day, selectedUnderwriter]);
   const baseRiskAccrued = baseRiskInfo.total;
 
   const revealedCount = boss
@@ -3080,7 +3165,15 @@ function UnderwritersGambit() {
                     <span className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">{uw.title}</span>
                     <span className={`text-[10px] uppercase font-bold tracking-widest ${a.text}`}>{uw.pool.length} cards</span>
                   </div>
-                  <h3 className="text-2xl sm:text-3xl font-black text-white tracking-tight uppercase leading-none mb-3">{uw.name}</h3>
+                  <h3 className="text-2xl sm:text-3xl font-black text-white tracking-tight uppercase leading-none mb-2">{uw.name}</h3>
+                  {uw.keyword && (
+                    <div className="mb-3" title={uw.keywordDesc}>
+                      <span className={`inline-block px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-widest border ${a.border} ${a.bg} ${a.text}`}>
+                        {uw.keyword}
+                      </span>
+                      <p className="text-[10px] text-neutral-400 leading-snug mt-1.5">{uw.keywordDesc}</p>
+                    </div>
+                  )}
                   <p className="text-[11px] sm:text-xs text-neutral-300 leading-snug mb-4 flex-1">{uw.blurb}</p>
 
                   {/* Signature card preview */}
@@ -3617,10 +3710,34 @@ function UnderwritersGambit() {
 
           {lastOutcome.riskScore != null && (
             <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 mb-6 text-xs">
-              <div className="text-[10px] uppercase tracking-widest text-neutral-500 mb-1">Final Risk Score (after volatility)</div>
-              <div className={`font-mono font-bold text-2xl ${toneText[tone]}`}>{lastOutcome.riskScore}</div>
-              <div className="text-[10px] text-neutral-500 mt-2 leading-snug">
-                Outcome is read off this score, not rolled. &lt;25 Clean Clear · 25-50 Cleared · 50-65 Stressed · 65-80 Breach · 80-95 Default · 95+ Collapse.
+              <div className="grid grid-cols-3 gap-2 mb-3">
+                <div>
+                  <div className="text-[9px] uppercase tracking-widest text-neutral-500">Final Risk</div>
+                  <div className={`font-mono font-bold text-xl ${toneText[tone]}`}>{lastOutcome.riskScore}</div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-widest text-neutral-500">Threshold</div>
+                  <div className="font-mono font-bold text-xl text-neutral-300">{lastOutcome.threshold ?? '—'}</div>
+                </div>
+                <div>
+                  <div className="text-[9px] uppercase tracking-widest text-neutral-500">Over By</div>
+                  <div className={`font-mono font-bold text-xl ${lastOutcome.riskOver > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{lastOutcome.riskOver ?? 0}</div>
+                </div>
+              </div>
+              {lastOutcome.damage > 0 && (
+                <div className="grid grid-cols-2 gap-2 pt-3 border-t border-neutral-800">
+                  <div>
+                    <div className="text-[9px] uppercase tracking-widest text-emerald-500">Profit Booked</div>
+                    <div className="font-mono font-bold text-base text-emerald-400">{formatMoney(lastOutcome.grossProfit ?? 0)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[9px] uppercase tracking-widest text-red-500">Capital Damage</div>
+                    <div className="font-mono font-bold text-base text-red-400">−{formatMoney(lastOutcome.damage)}</div>
+                  </div>
+                </div>
+              )}
+              <div className="text-[10px] text-neutral-500 mt-3 leading-snug">
+                Risk above threshold = damage to Capital, scaled by advance. Profit is paid in full at clean reads, scaled down as risk climbs. No dice — every point you mitigated was one point off the damage.
               </div>
             </div>
           )}
@@ -3995,6 +4112,8 @@ function UnderwritersGambit() {
             relics={relics}
             capital={capital}
             baseRiskBreakdown={baseRiskInfo.parts}
+            selectedUnderwriter={selectedUnderwriter}
+            cardsPlayedThisTurn={cardsPlayedThisTurn}
           />
         </div>
 
