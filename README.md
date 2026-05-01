@@ -35,6 +35,25 @@ Math + thresholds ported from a production MCA underwriting platform:
 
 This repo deploys to GitHub Pages from the root directory of `main`. Any push to `main` republishes.
 
+## Generating art (Nano Banana)
+
+`scripts/genart.js` generates PNGs via Google's Gemini image model and writes them to `assets/`.
+
+Setup (one-time):
+1. Put your key in `.env.local` at the repo root: `GEMINI_API_KEY=...`
+2. `.env.local` is gitignored — never commit it.
+3. Image generation requires a billing-enabled Google AI Studio key. Free-tier keys return HTTP 429 with `RESOURCE_EXHAUSTED` for image models.
+
+Usage:
+```
+node scripts/genart.js <output-filename> "<prompt>"
+node scripts/genart.js boss-pillow-tycoon.png "pixel art portrait, bloated infomercial mogul in pinstripe pajamas, neon noir, 512x512"
+```
+
+Optional env overrides:
+- `GEMINI_MODEL` — defaults to `gemini-2.5-flash-image`. Other accessible options: `gemini-3-pro-image-preview`, `gemini-3.1-flash-image-preview`.
+- `GEMINI_OUT_DIR` — defaults to `assets/`.
+
 ## License
 
 All rights reserved by the author.
