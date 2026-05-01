@@ -1224,6 +1224,14 @@ function attachCombatStats(file, day, isBoss) {
   } else {
     abilities = pickAbilitiesForFile(file, false);
   }
+  // Background music slot — encounter useEffect reads this to pick the right track.
+  // Final boss → its theme. Renewal bosses (end-of-day) → random Boss 1-5. Scam mini-bosses get
+  // their own track later (left null so they fall back to Day 1 ambience until that file lands).
+  // Plain files & day 1 → Day 1 ambience.
+  let bgMusic = 'Day 1';
+  if (isFinal) bgMusic = 'Final Boss Theme';
+  else if (file.isRenewalBoss) bgMusic = 'Boss ' + (1 + Math.floor(Math.random() * 5));
+  else if (file.isScam) bgMusic = null; // placeholder until you drop a Mini Boss track
   return {
     ...file,
     name: displayName,
@@ -1236,6 +1244,7 @@ function attachCombatStats(file, day, isBoss) {
     intent: pickNextIntent(abilities),
     maxTurns,
     riskThreshold,
+    bgMusic,
     activeStatuses: [], // for DOT effects like cash_crisis / subprime_slumber
   };
 }
@@ -2182,78 +2191,47 @@ function UnderwritersGambit() {
   const [audioStatus, setAudioStatus] = useState('idle');
   const [audioErrorMsg, setAudioErrorMsg] = useState('');
   const currentTrackRef = useRef(null);
-  // Sandboxed iframes block relative URLs in fetch/audio. The CSS-probe trick is the most
-  // reliable: drop a hidden div with `background-image: url('assets/Start.png')`, read it back
-  // via getComputedStyle, and the browser hands us the *fully resolved* absolute URL — the
-  // same one it's already using to render the visible background. Swap the filename and audio
-  // gets a working absolute path. Cached via ref.
+  // Resolve the absolute base URL for assets/ once, cache it. CSS-probe is the most reliable
+  // across iframe schemes (returns the same URL the visible background image uses); on real
+  // HTTPS hosting `document.baseURI` works directly.
   const audioBaseRef = useRef(null);
-  const trackForGameState = (s) => {
-    // Prefer the data-URI sidecar — bypasses every URL-resolution failure mode in sandboxed iframes.
-    if (typeof window !== 'undefined' && window.GAMBIT_AUDIO) {
-      if (s === 'MENU')             return window.GAMBIT_AUDIO.menu   || null;
-      if (s === 'CHARACTER_SELECT') return window.GAMBIT_AUDIO.select || null;
-      return null;
-    }
-    const filename =
-      s === 'MENU'             ? 'not-a-loan.mp3' :
-      s === 'CHARACTER_SELECT' ? 'select-screen-2.mp3' : null;
-    if (!filename) return null;
-    const rel = 'assets/' + filename;
-    if (audioBaseRef.current === null) {
-      let resolved = null;
-      const log = (label, val) => { try { console.log('[audio-url] ' + label + ':', val); } catch (e) {} };
-      // CSS-probe — most reliable because we know the background image actually loads
+  const getAudioBase = () => {
+    if (audioBaseRef.current !== null) return audioBaseRef.current;
+    let resolved = null;
+    try {
+      let probe = document.getElementById('__audioprobe');
+      if (!probe) {
+        probe = document.createElement('div');
+        probe.id = '__audioprobe';
+        probe.style.cssText = 'position:absolute;width:0;height:0;visibility:hidden;background-image:url(assets/Start.png);';
+        document.body.appendChild(probe);
+      }
+      const cs = window.getComputedStyle(probe).backgroundImage || '';
+      const m = cs.match(/url\(["']?([^"')]+)["']?\)/);
+      if (m && /^https?:/i.test(m[1])) resolved = m[1].replace(/[^/]+(\?.*)?$/, '');
+    } catch (e) {}
+    if (!resolved) {
       try {
-        let probe = document.getElementById('__audioprobe');
-        if (!probe) {
-          probe = document.createElement('div');
-          probe.id = '__audioprobe';
-          probe.style.cssText = 'position:absolute;width:0;height:0;visibility:hidden;background-image:url(assets/Start.png);';
-          document.body.appendChild(probe);
+        if (document.baseURI && /^https?:/i.test(document.baseURI)) {
+          resolved = new URL('assets/', document.baseURI).href;
         }
-        const cs = window.getComputedStyle(probe).backgroundImage || '';
-        const m = cs.match(/url\(["']?([^"')]+)["']?\)/);
-        log('css-probe', m ? m[1] : '(no match in ' + cs + ')');
-        if (m && /^https?:/i.test(m[1])) {
-          resolved = m[1].replace(/Start\.png(\?.*)?$/, filename);
-        }
-      } catch (e) { log('css-probe ERROR', e.message); }
-      // document.baseURI fallback
-      if (!resolved) {
-        try {
-          log('document.baseURI', document.baseURI);
-          if (document.baseURI && /^https?:/i.test(document.baseURI)) {
-            resolved = new URL(rel, document.baseURI).href;
-          }
-        } catch (e) { log('baseURI ERROR', e.message); }
-      }
-      // Performance entries fallback
-      if (!resolved) {
-        try {
-          const entries = (performance.getEntriesByType && performance.getEntriesByType('resource')) || [];
-          const known = entries.find((e) => /\/assets\//i.test(e.name) && /^https?:/i.test(e.name));
-          log('perf entry', known ? known.name : '(none)');
-          if (known) resolved = known.name.replace(/[^/]+(\?.*)?$/, '') + filename;
-        } catch (e) { log('perf ERROR', e.message); }
-      }
-      // <img>.src fallback
-      if (!resolved) {
-        try {
-          const probe = new window.Image();
-          probe.src = rel;
-          log('img.src', probe.src);
-          if (probe.src && /^https?:/i.test(probe.src)) {
-            resolved = probe.src.replace(/[^/]+(\?.*)?$/, filename);
-          }
-        } catch (e) { log('img.src ERROR', e.message); }
-      }
-      audioBaseRef.current = resolved || rel;
-      log('CHOSEN', audioBaseRef.current);
+      } catch (e) {}
     }
-    const cached = audioBaseRef.current;
-    if (cached.endsWith(filename)) return cached;
-    return cached.replace(/[^/]+(\?.*)?$/, '') + filename;
+    audioBaseRef.current = resolved || 'assets/';
+    return audioBaseRef.current;
+  };
+  // Per-state music routing. ENCOUNTER picks up `boss.bgMusic` (set in attachCombatStats),
+  // so a single fight always plays the same file across re-renders.
+  const trackForGameState = (s, currentBoss) => {
+    const base = getAudioBase();
+    if (s === 'MENU')             return base + 'not-a-loan.mp3';
+    if (s === 'CHARACTER_SELECT') return base + 'select-screen-2.mp3';
+    if (s === 'INTERMISSION')     return base + encodeURI('Day 1.mp3');
+    if (s === 'ENCOUNTER') {
+      const name = (currentBoss && currentBoss.bgMusic) || 'Day 1';
+      return base + encodeURI(name + '.mp3');
+    }
+    return null;
   };
 
   // Global audio control rendered on every screen. JSX const so we don't repeat the same block six times;
@@ -2295,11 +2273,6 @@ function UnderwritersGambit() {
               onChange={(e) => { setAudioVolume(parseFloat(e.target.value) / 100); if (audioMuted) setAudioMuted(false); tryPlayDirect(); }}
               className="w-24 accent-purple-500" />
             <span className="text-[10px] font-mono text-white/70 w-7 text-right">{Math.round((audioMuted ? 0 : audioVolume) * 100)}</span>
-          </div>
-          <div className="flex items-center gap-1.5 text-[10px] font-mono">
-            <span className={`w-1.5 h-1.5 rounded-full ${statusDot}`} />
-            <span className="text-white/70 uppercase tracking-widest">{audioStatus}</span>
-            <button onClick={tryPlayDirect} className="ml-auto text-purple-300 hover:text-purple-200 underline-offset-2 hover:underline">play</button>
           </div>
           {audioErrorMsg && (
             <div className="text-[10px] font-mono text-red-300 leading-snug break-all">{audioErrorMsg}</div>
@@ -2963,22 +2936,20 @@ function UnderwritersGambit() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Track-switch effect — uses currentTrackRef (declared near the other audio state up top) so
-  // we don't restart the same file on every gameState change. Direct audio.src comparison is
-  // unreliable in iframe schemes; ref equality is robust.
+  // Track-switch effect — keyed on gameState AND boss.bgMusic so a new boss with a different
+  // theme triggers a switch. Same-track re-renders are silent (no restart).
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
-    const track = trackForGameState(gameState);
+    const track = trackForGameState(gameState, boss);
     if (!track) { audio.pause(); return; }
     if (currentTrackRef.current !== track) {
       audio.src = track;
       audio.currentTime = 0;
       currentTrackRef.current = track;
     }
-    // play() returns a promise; autoplay-blocked failures are silent — first user gesture retries.
     audio.play().catch(() => {});
-  }, [gameState]);
+  }, [gameState, boss?.bgMusic]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = audioMuted ? 0 : audioVolume;
@@ -2997,7 +2968,7 @@ function UnderwritersGambit() {
     const tryUnlock = () => {
       const audio = audioRef.current;
       if (!audio || audioMuted) return;
-      const track = trackForGameState(gameState);
+      const track = trackForGameState(gameState, boss);
       if (!track) return;
       audio.play().then(() => {
         if (removed) return;
@@ -3016,7 +2987,7 @@ function UnderwritersGambit() {
       document.removeEventListener('keydown', tryUnlock);
       document.removeEventListener('touchstart', tryUnlock);
     };
-  }, [gameState, audioMuted]);
+  }, [gameState, audioMuted, boss?.bgMusic]);
 
   // === Animated rain on the start screen ===
   // Runs only while gameState === 'MENU'. Uses requestAnimationFrame on a 2D canvas
