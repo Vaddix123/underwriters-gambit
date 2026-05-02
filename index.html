@@ -324,7 +324,7 @@ import {
   Phone, Calculator, Sparkles, FlaskConical, Wine, RefreshCw, Pill, HelpCircle, Info,
   BookOpen, Handshake, Banknote, ArrowRightLeft, Undo2, Link2, FileText, Award,
   Plus, Minus, ScrollText, ListChecks, GitBranch, Settings2, BarChart3,
-  Volume2, VolumeX
+  Volume2, VolumeX, Check
 } from 'https://esm.sh/lucide-react@0.383.0';
 
 // ============================================================================
@@ -1028,6 +1028,13 @@ const RELIC_POOL = [
   { id: 'r_iso_book',   name: 'ISO Rolodex',         desc: 'ISO tier visible on every file (including fraud risk).',     cost: 400, icon: BookOpen },
   { id: 'r_renewal',    name: 'Reload Desk',         desc: '+10% renewal chance on cleared deals.',                      cost: 700, icon: RefreshCw },
   { id: 'r_forensic',   name: 'Forensic Eye',        desc: 'Bank reveal also exposes the file\'s top anomaly.',         cost: 600, icon: Search },
+  // === Archetype Pullers (Fix F6 — RC4: Compressed Progression) ===
+  // These relics buff every card of their class. Buying one mid-run shapes the deck-build
+  // around the archetype. Visually marked in Broker Row with an amber border + badge so
+  // players recognize them as identity-defining picks.
+  { id: 'r_forensic_engine', name: 'Forensic Engine', desc: 'Forensic cards cost 1 less Energy (min 0).',                cost: 750, icon: ScrollText, archetype: 'forensic' },
+  { id: 'r_aggro_battery',   name: 'Aggro Battery',   desc: 'Aggro cards deal +4 damage to the file.',                   cost: 800, icon: Zap,        archetype: 'aggro' },
+  { id: 'r_reveal_toolkit',  name: 'Reveal Toolkit',  desc: 'Reveal cards apply −3 Risk modifier on play.',              cost: 700, icon: Eye,        archetype: 'reveal' },
 ];
 
 const CONSUMABLE_POOL = [
@@ -2017,7 +2024,7 @@ function HelpModal({ onClose }) {
               <li><strong className="text-white">Term Sheet</strong> — Set your funding terms with four levers: Advance %, Term Days, Holdback %, Factor.</li>
               <li><strong className="text-white">Decision</strong> — Decline the file, or Submit your term sheet.</li>
               <li><strong className="text-white">Resolution</strong> — Cleared deals book profit; Defaults eat the advance.</li>
-              <li><strong className="text-white">Draft</strong> — Pick one new card to add to your deck.</li>
+              <li><strong className="text-white">Draft</strong> — 5 cards offered, pick 2. Boss days guarantee a rare. Final boss offers 6 cards, pick 3 with 2 rares. Skip Draft if nothing fits.</li>
             </ol>
           </section>
 
@@ -2734,6 +2741,11 @@ function UnderwritersGambit() {
   const [shopkeeper, setShopkeeper] = useState(null);
   const [refreshUsed, setRefreshUsed] = useState(0);
   const [draftChoices, setDraftChoices] = useState([]);
+  // (Fix F6) Multi-pick draft state. draftPickTarget: how many cards the player must pick.
+  // draftedThisStep: Set of card uids picked this draft (kept as Array in state for React
+  // shallow-compare cleanliness; treated as a Set at use time).
+  const [draftPickTarget, setDraftPickTarget] = useState(2);
+  const [draftedThisStep, setDraftedThisStep] = useState([]);
   const [lastOutcome, setLastOutcome] = useState(null);
 
   const [showHelp, setShowHelp] = useState(false);
@@ -3019,14 +3031,22 @@ function UnderwritersGambit() {
   // === Card play ===
   const playCard = (idx) => {
     const card = hand[idx];
-    if (!card || energy < card.energy) return;
+    if (!card) return;
+
+    // (Fix F6) Archetype Puller — Forensic Engine reduces Forensic card cost by 1 (floor 0).
+    // Computed once per play; same value used for canPlay check, energy spend, etc.
+    const cardClass = getCardClass(card);
+    const forensicDiscount = (relics.includes('r_forensic_engine') && cardClass === 'forensic') ? 1 : 0;
+    const effectiveEnergy = Math.max(0, card.energy - forensicDiscount);
+
+    if (energy < effectiveEnergy) return;
 
     // Validate targeting for cards that need it
     if ((card.type === 'REVEAL' || card.target) && !canRevealTarget(card.target)) return;
 
     // DECLINE cards short-circuit the encounter — discard & spend energy, then trigger decline w/ bonus
     if (card.type === 'DECLINE') {
-      setEnergy((e) => e - card.energy);
+      setEnergy((e) => e - effectiveEnergy);
       executeDecline(card.bonus || 0);
       return;
     }
@@ -3036,15 +3056,22 @@ function UnderwritersGambit() {
     // endTurn skips the threat effect. Visual feedback fires inside ThreatCard via the flag.
     const willDefuseThreat = cardCountersThreat(card, boss);
 
-    // Discard the card and spend energy
+    // Discard the card and spend energy (effective cost reflects Forensic Engine discount)
     const newHand = hand.filter((_, i) => i !== idx);
     setHand(newHand);
     setDiscardPile((d) => [...d, card]);
-    setEnergy((e) => e - card.energy);
+    setEnergy((e) => e - effectiveEnergy);
     setCardsPlayedThisTurn((n) => n + 1);
 
     if (willDefuseThreat) {
       setBoss((b) => b ? { ...b, threatDefused: true } : b);
+    }
+
+    // (Fix F6) Reveal Toolkit — Reveal cards push a -3 Risk modifier into activeMods on
+    // play. Compounds with multi-reveal builds; the more reveals you play, the more risk
+    // mitigation you stack. This is what makes "Reveal-heavy" a real archetype.
+    if (relics.includes('r_reveal_toolkit') && card.type === 'REVEAL') {
+      setActiveMods((m) => [...m, { name: card.name + ' (Toolkit)', risk: -3 }]);
     }
 
     // Apply effects in order: reveals, modifiers, energy, draw, commission bonus, damage, block
@@ -3071,7 +3098,10 @@ function UnderwritersGambit() {
     }
 
     // Combat: damage to file, block buff to player. File block soaks damage first (StS-style).
-    const dmg = deriveCardDamage(card);
+    // (Fix F6) Aggro Battery — Aggro cards deal +4 damage. Applied at play time so we
+    // don't touch the deriveCardDamage hot path; relic-owned check is O(1).
+    const aggroBonus = (relics.includes('r_aggro_battery') && cardClass === 'aggro') ? 4 : 0;
+    const dmg = deriveCardDamage(card) + aggroBonus;
     if (dmg > 0) {
       setBoss((b) => {
         if (!b) return b;
@@ -3454,10 +3484,14 @@ function UnderwritersGambit() {
       setCommission((c) => c + scamBonus);
     }
 
-    let draftSize = 3;
+    // (Fix F6) Multi-pick draft. Pool size + pick count + rare guarantees scale by encounter
+    // type. Doubles draft pace vs the prior 1-of-3 system without flooding the deck —
+    // 2 picks per day means archetype crystallization by Day 5 instead of never.
+    let draftSize = 5;
+    let pickCount = 2;
     let rareGuarantees = 0;
-    if (cleared && wasBoss) { draftSize = 4; rareGuarantees = 1; }
-    if (cleared && wasFinal) { draftSize = 5; rareGuarantees = 2; }
+    if (cleared && wasBoss)  { draftSize = 5; pickCount = 2; rareGuarantees = 1; }
+    if (cleared && wasFinal) { draftSize = 6; pickCount = 3; rareGuarantees = 2; }
 
     const uw = UNDERWRITERS.find((u) => u.id === selectedUnderwriter);
     const draftSource = uw ? uw.pool : CARD_POOL;
@@ -3474,11 +3508,29 @@ function UnderwritersGambit() {
 
     const choices = chosen.map((c, i) => ({ ...c, uid: c.id + '_d' + Date.now() + '_' + i }));
     setDraftChoices(choices);
+    setDraftPickTarget(Math.min(pickCount, choices.length));
+    setDraftedThisStep([]);
     setGameState('DRAFT');
   };
 
-  const draftCard = (card) => {
-    if (card) setDeck((d) => [...d, card]);
+  // (Fix F6) Multi-pick draft handlers. toggleDraftPick adds/removes from the staged set.
+  // confirmDraft commits all picked cards to the deck and advances. skipDraft advances with
+  // no picks (preserves agency — sometimes nothing fits).
+  const toggleDraftPick = (uid) => {
+    setDraftedThisStep((arr) => {
+      if (arr.includes(uid)) return arr.filter((x) => x !== uid);
+      if (arr.length >= draftPickTarget) return arr; // cap reached
+      return [...arr, uid];
+    });
+  };
+  const confirmDraft = () => {
+    const picked = draftChoices.filter((c) => draftedThisStep.includes(c.uid));
+    if (picked.length > 0) setDeck((d) => [...d, ...picked]);
+    setDraftedThisStep([]);
+    advanceDay();
+  };
+  const skipDraft = () => {
+    setDraftedThisStep([]);
     advanceDay();
   };
 
@@ -4306,19 +4358,35 @@ function UnderwritersGambit() {
                 {shopRelics.map((r) => {
                   const cost = Math.floor(r.cost * priceMultiplier(day));
                   const owned = relics.includes(r.id);
+                  // (Fix F6) Archetype Pullers — visually distinct in Broker Row so the
+                  // player recognizes them as run-shaping picks vs. flat utility relics.
+                  const isPuller = !!r.archetype;
                   return (
                     <button key={r.id} onClick={() => buyRelic(r)} disabled={owned || commission < cost}
-                      className="w-full bg-neutral-900 border border-neutral-800 rounded-xl p-3 flex items-center gap-3 hover:border-blue-700 disabled:opacity-40 disabled:hover:border-neutral-800 transition-colors text-left">
-                      <div className="w-10 h-10 rounded-full bg-blue-950/50 border border-blue-900/50 flex items-center justify-center shrink-0">
-                        <r.icon size={18} className="text-blue-400" />
+                      className={`w-full rounded-xl p-3 flex items-center gap-3 transition-colors text-left ${
+                        isPuller
+                          ? 'bg-amber-950/30 border-2 border-amber-700/60 hover:border-amber-500 disabled:opacity-40 disabled:hover:border-amber-700/60'
+                          : 'bg-neutral-900 border border-neutral-800 hover:border-blue-700 disabled:opacity-40 disabled:hover:border-neutral-800'
+                      }`}>
+                      <div className={`w-10 h-10 rounded-full border flex items-center justify-center shrink-0 ${
+                        isPuller ? 'bg-amber-950/60 border-amber-700/60' : 'bg-blue-950/50 border-blue-900/50'
+                      }`}>
+                        <r.icon size={18} className={isPuller ? 'text-amber-300' : 'text-blue-400'} />
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="font-bold text-sm text-white">{r.name}</div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="font-bold text-sm text-white">{r.name}</div>
+                          {isPuller && (
+                            <span className="text-[8px] uppercase tracking-widest font-black bg-amber-700/40 text-amber-200 px-1.5 py-0.5 rounded border border-amber-600/40">
+                              Archetype Puller
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-neutral-400 leading-tight">{r.desc}</div>
                       </div>
                       <div className="text-right shrink-0">
                         <div className="text-amber-400 font-mono font-bold text-sm">{formatMoney(cost)}</div>
-                        <div className="text-[9px] uppercase tracking-widest text-neutral-600">Permanent</div>
+                        <div className="text-[9px] uppercase tracking-widest text-neutral-600">{isPuller ? 'Run-shaping' : 'Permanent'}</div>
                       </div>
                     </button>
                   );
@@ -4386,26 +4454,60 @@ function UnderwritersGambit() {
   }
 
   if (gameState === 'DRAFT') {
+    // (Fix F6) Multi-pick draft. Player picks `draftPickTarget` cards from `draftChoices`.
+    // Picked cards visually depress + dim; Confirm enables when target reached. Skip path
+    // commits zero cards and advances. The grid is 3-col on desktop to fit 5-6 cards.
+    const pickedCount = draftedThisStep.length;
+    const canConfirm = pickedCount > 0;
+    const targetMet = pickedCount >= draftPickTarget;
     return (
       <div className="min-h-screen bg-neutral-950 flex flex-col items-center justify-center p-4 sm:p-6 text-neutral-200">
-        <div className="max-w-4xl w-full">
-          <h2 className="text-xl sm:text-2xl font-black text-white uppercase tracking-widest text-center mb-8">Draft a Card</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6 mb-8">
-            {draftChoices.map((card, i) => (
-              <button key={i} onClick={() => draftCard(card)}
-                className={`min-h-[16rem] rounded-2xl border flex flex-col items-center justify-center p-6 text-center transition-all transform hover:-translate-y-2 hover:shadow-xl group ${card.color}`}>
-                <card.icon size={32} className="mb-4 opacity-80 group-hover:opacity-100 transition-opacity" />
-                <h3 className="font-black text-lg uppercase tracking-widest mb-2">{card.name}</h3>
-                <p className="text-xs opacity-80 font-mono mb-3">{card.desc}</p>
-                <p className="text-[10px] opacity-60 leading-snug mb-4">{card.tooltip}</p>
-                <div className="mt-auto inline-flex items-center gap-1 bg-black/30 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest">
-                  <Zap size={10} /> {card.energy} Cost
-                </div>
-              </button>
-            ))}
+        <div className="max-w-5xl w-full">
+          <div className="text-center mb-6">
+            <h2 className="text-xl sm:text-2xl font-black text-white uppercase tracking-widest mb-2">Draft Cards</h2>
+            <div className="text-[11px] uppercase font-bold tracking-widest text-neutral-500">
+              Pick <span className={`font-mono ${targetMet ? 'text-emerald-400' : 'text-amber-400'}`}>{pickedCount}</span> of <span className="font-mono text-neutral-300">{draftPickTarget}</span>
+            </div>
           </div>
-          <div className="text-center">
-            <button onClick={() => draftCard(null)} className="px-8 py-3 text-neutral-500 font-bold hover:text-white transition-colors uppercase tracking-widest text-sm">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 sm:gap-4 mb-6">
+            {draftChoices.map((card, i) => {
+              const isPicked = draftedThisStep.includes(card.uid);
+              const atCap = !isPicked && pickedCount >= draftPickTarget;
+              return (
+                <button key={i} onClick={() => toggleDraftPick(card.uid)} disabled={atCap}
+                  className={`min-h-[14rem] rounded-2xl border flex flex-col items-center justify-center p-4 text-center transition-all transform group ${card.color} ${
+                    isPicked
+                      ? 'ring-4 ring-emerald-400 scale-95 shadow-[0_0_30px_rgba(16,185,129,0.45)]'
+                      : atCap
+                        ? 'opacity-30 cursor-not-allowed'
+                        : 'hover:-translate-y-2 hover:shadow-xl cursor-pointer'
+                  }`}>
+                  {isPicked && (
+                    <div className="absolute top-3 right-3 text-emerald-300">
+                      <Check size={16} />
+                    </div>
+                  )}
+                  <card.icon size={28} className="mb-3 opacity-80 group-hover:opacity-100 transition-opacity" />
+                  <h3 className="font-black text-base uppercase tracking-widest mb-1.5">{card.name}</h3>
+                  <p className="text-[11px] opacity-80 font-mono mb-2">{card.desc}</p>
+                  <p className="text-[10px] opacity-60 leading-snug mb-3 line-clamp-2">{card.tooltip}</p>
+                  <div className="mt-auto inline-flex items-center gap-1 bg-black/30 px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-widest">
+                    <Zap size={10} /> {card.energy} Cost
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <div className="text-center flex items-center justify-center gap-4 flex-wrap">
+            <button onClick={confirmDraft} disabled={!canConfirm}
+              className={`px-8 py-3 font-black rounded-xl uppercase tracking-widest transition-all ${
+                canConfirm
+                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-900/30'
+                  : 'bg-neutral-800 text-neutral-600 cursor-not-allowed'
+              }`}>
+              {canConfirm ? `Confirm ${pickedCount} Pick${pickedCount > 1 ? 's' : ''}` : `Pick at least 1 card`}
+            </button>
+            <button onClick={skipDraft} className="px-8 py-3 text-neutral-500 font-bold hover:text-white transition-colors uppercase tracking-widest text-sm">
               Skip Draft
             </button>
           </div>
@@ -5067,7 +5169,11 @@ function UnderwritersGambit() {
             {hand.map((card, idx) => {
               // canRevealTarget handles single targets, arrays, and special keywords (all_basic, random, iso, forensic)
               const targetUnplayable = (card.type === 'REVEAL' || (card.type === 'UTILITY' && card.target)) && !canRevealTarget(card.target);
-              const canPlay = energy >= card.energy && !targetUnplayable;
+              // (Fix F6) Effective energy cost reflects Forensic Engine discount on Forensic cards
+              const cardClassDisplay = getCardClass(card);
+              const forensicDiscountDisplay = (relics.includes('r_forensic_engine') && cardClassDisplay === 'forensic') ? 1 : 0;
+              const effectiveEnergyDisplay = Math.max(0, card.energy - forensicDiscountDisplay);
+              const canPlay = energy >= effectiveEnergyDisplay && !targetUnplayable;
               const isInspected = inspectedCardId === card.uid;
               // (Fix F3) Synergy glow — scan card conditions vs. live ctx. cyan ring when one
               // condition is active; amber pulse when synergy is strong (multi-condition or
@@ -5093,8 +5199,9 @@ function UnderwritersGambit() {
                     className={`relative w-24 sm:w-32 h-36 sm:h-40 rounded-lg border flex flex-col p-2 transition-all transform hover:-translate-y-1 shadow-xl text-left ${card.color} ${synergyClass} ${
                       canPlay ? 'hover:shadow-[0_0_20px_rgba(255,255,255,0.1)] cursor-pointer' : 'opacity-40 grayscale cursor-not-allowed'
                     }`}>
-                    <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-black/50 flex items-center justify-center font-bold text-[10px]">
-                      {card.energy}
+                    <div className={`absolute top-1.5 left-1.5 w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] ${forensicDiscountDisplay > 0 ? 'bg-purple-700 ring-1 ring-purple-300' : 'bg-black/50'}`}
+                         title={forensicDiscountDisplay > 0 ? `Forensic Engine: cost reduced from ${card.energy}` : ''}>
+                      {effectiveEnergyDisplay}
                     </div>
                     <card.icon className="mx-auto mt-5 mb-2 opacity-80" size={20} />
                     <div className="font-black text-[10px] uppercase tracking-wider mb-0.5 text-center">{card.name}</div>
