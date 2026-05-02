@@ -1246,6 +1246,99 @@ function classifyRiskBand(stressedRisk) {
   return RISK_BANDS[RISK_BANDS.length - 1];
 }
 
+// === (Fix F5) Anomaly-Specific Default Story ==========================================
+// When a deal lands in Default / Breach / Collapse (or Stressed with non-trivial damage),
+// diagnoseOutcome() picks the dominant cause and returns a one-line headline + lesson.
+// Retires partial 12 (no fail-forward — defaults teach nothing) and partial 18 (post-
+// resolution screen as static spreadsheet). Cause selection priority:
+//   1. Vitals violation (over-leverage / over-pull / unread-file penalty)
+//   2. Hidden anomaly the player never surfaced — gotcha tier
+//   3. Visible anomaly the player saw but didn't mitigate enough — accepted-risk tier
+//   4. File attribute (sub-prime FICO / thin TIB / position 3+) — known weakness tier
+//   5. Combined headwinds — generic fallback when nothing dominates
+const ANOMALY_DEFAULT_NARRATIVES = {
+  nsf_cluster:        { detail: 'NSF clusters meant the merchant was running out of cash before your debit hit.',                      lesson: 'Run Forensic Review on Aggressive ISO files — NSF density flags before you fund.' },
+  undisclosed_mca:    { detail: 'Undisclosed MCA — another funder was already pulling daily debits you never saw.',                    lesson: 'UCC position reveal + Forensic catch hidden stacking before submission.' },
+  pass_through:       { detail: 'Pass-through activity. The entity was a conduit, not an operating business.',                         lesson: 'Bank Statement reveal + Forensic catch wash patterns. Decline if Forensic surfaces this.' },
+  reversed_wire:      { detail: 'A reversed wire turned out to be a customer dispute that drained the account.',                       lesson: 'Bank reveal exposes reversal flags — read it before pushing the rate.' },
+  structuring:        { detail: 'Cash deposits structured under $10K — BSA-flagged operation, frozen mid-payback.',                    lesson: 'Forensic exposes structuring. Decline files where Forensic flags it.' },
+  eod_zero:           { detail: 'End-of-day zero balances — the account was a sweep, not the operating one.',                          lesson: 'Bank reveal flags EOD-zero patterns — request the operating account before funding.' },
+  round_deposits:     { detail: 'Round-number wires with no source trail — the cash came from places you weren\'t supposed to fund.',  lesson: 'Forensic catches origin issues. Premier ISO submissions reduce origin-flag exposure.' },
+  multiple_mca:       { detail: 'Three concurrent MCAs already pulling — the daily debit stack collapsed the merchant.',               lesson: 'UCC position reveal shows stacking depth. Decline at position 3+ unless margin is wide.' },
+  declining_revenue:  { detail: 'Revenue trended down 15%+ — you funded a deteriorating business that couldn\'t recover.',             lesson: 'Bank reveal shows revenue trend. Lower advance % on declining-revenue files.' },
+  cross_collateral:   { detail: 'Cross-collateral hint — affiliated entities were already encumbered elsewhere.',                      lesson: 'Forensic catches inter-company patterns. Demand pari passu or decline.' },
+  large_cash_out:     { detail: 'A large cash withdrawal drained the account before you could collect.',                               lesson: 'Bank reveal flags large unrecorded payouts. Tighten holdback on flagged files.' },
+};
+const VITAL_NARRATIVES = {
+  over_leverage: { detail: 'Over-leverage. Total daily debits exceeded the term-band cap. Merchant cratered under stack pressure.',  lesson: 'Lower advance OR shorten term to bring leverage under cap. Live Risk Meter shows the violation.' },
+  over_pull:     { detail: 'Over-pull. Daily debit exceeded the holdback ceiling — merchant had no cash to operate.',                 lesson: 'Tighten holdback OR lengthen term to drop daily debit below ceiling.' },
+  unread_file:   { detail: 'You funded blind. Unread attributes came back as anomalies you couldn\'t mitigate.',                      lesson: 'Burn the file\'s HP first — every reveal lowers the unread-file penalty before submit.' },
+};
+const ATTRIBUTE_NARRATIVES = {
+  fico_subprime:  { detail: 'Sub-prime credit. The merchant couldn\'t sustain daily debit pressure on the structured rate.',          lesson: 'Lower advance % AND shorten term on sub-prime files. Push Rate cards make sub-prime files worse.' },
+  tib_thin:       { detail: 'Thin time-in-business. The merchant didn\'t have the operating history to weather payback.',             lesson: 'Shorten term + reduce advance on <2yr TIB files. Decline thin-TIB files at position 2+.' },
+  position_third: { detail: 'Position 3 stacking. By the time you collected, two prior funders had already drained the account.',    lesson: 'Decline position 3+ files OR demand pari passu via Senior Review. Your debit hits last.' },
+};
+
+function diagnoseOutcome(boss, offer, vitalsState, finalRisk, threshold) {
+  if (!boss || !offer) return null;
+  const damage = vitalsState?.damage || 0;
+  const bandName = vitalsState?.bandName || '';
+  // Skip diagnosis on Clean Clear / Cleared, and on Stressed with trivial damage (< $1000).
+  const isBadOutcome = bandName === 'Default' || bandName === 'Collapse' || bandName === 'Breach';
+  const isStressedWarning = bandName === 'Stressed' && damage > 1000;
+  if (!isBadOutcome && !isStressedWarning) return null;
+
+  const severity = isBadOutcome ? 'fatal' : 'warning';
+
+  // Priority 1 — vitals violation
+  if (vitalsState?.overLeverage > 0)  return { ...VITAL_NARRATIVES.over_leverage, headline: 'Over-Leverage Cap Exceeded', severity, source: 'vital' };
+  if (vitalsState?.overPull > 0)      return { ...VITAL_NARRATIVES.over_pull,     headline: 'Holdback Ceiling Breached',  severity, source: 'vital' };
+  if (vitalsState?.hpPenalty > 20)    return { ...VITAL_NARRATIVES.unread_file,   headline: 'Funded Blind',               severity, source: 'vital' };
+
+  // Priority 2 — hidden anomalies (player never surfaced via Forensic)
+  const allAnomalies = (boss.anomalies || []).map((id) => ({ id, ...(ANOMALY_TYPES[id] || {}) })).filter((a) => a.label);
+  if (!boss.anomaliesRevealed && allAnomalies.length > 0) {
+    const heaviest = allAnomalies.slice().sort((a, b) => (b.risk || 0) - (a.risk || 0))[0];
+    if (heaviest && (heaviest.risk || 0) >= 8) {
+      const narrative = ANOMALY_DEFAULT_NARRATIVES[heaviest.id];
+      if (narrative) return { ...narrative, headline: heaviest.label + ' (Hidden)', severity, source: 'hidden_anomaly' };
+    }
+  }
+
+  // Priority 3 — visible anomalies (player saw them but didn't mitigate enough)
+  if (boss.anomaliesRevealed && allAnomalies.length > 0) {
+    const heaviest = allAnomalies.slice().sort((a, b) => (b.risk || 0) - (a.risk || 0))[0];
+    if (heaviest && (heaviest.risk || 0) >= 12) {
+      const narrative = ANOMALY_DEFAULT_NARRATIVES[heaviest.id];
+      if (narrative) return { ...narrative, headline: heaviest.label, severity, source: 'visible_anomaly' };
+    }
+  }
+
+  // Priority 4 — file attribute weaknesses
+  const ficoLabel = boss.hidden?.fico?.label;
+  if (ficoLabel === '500-549' || ficoLabel === '550-599') {
+    return { ...ATTRIBUTE_NARRATIVES.fico_subprime, headline: 'Sub-Prime Credit', severity, source: 'attribute' };
+  }
+  const tibValue = boss.hidden?.tib?.value;
+  if (typeof tibValue === 'number' && tibValue <= 1.5) {
+    return { ...ATTRIBUTE_NARRATIVES.tib_thin, headline: 'Thin TIB', severity, source: 'attribute' };
+  }
+  const posValue = boss.hidden?.position?.value;
+  if (typeof posValue === 'number' && posValue >= 3) {
+    return { ...ATTRIBUTE_NARRATIVES.position_third, headline: 'Deep Stack Position', severity, source: 'attribute' };
+  }
+
+  // Priority 5 — generic fallback
+  return {
+    headline:  'Combined Headwinds',
+    detail:    'No single cause dominated — base risk plus aggressive term-sheet levers added up past the threshold.',
+    lesson:    'Watch the Live Risk Meter. Threshold is the line; every point over carves into Capital.',
+    severity,
+    source:    'combined',
+  };
+}
+
 // === Combat: file abilities + intents ===
 // Each file is an "enemy" with HP. Cards do damage to chip the file's stubbornness.
 // The file fights back via abilities — telegraphed each turn as an intent (icon + tooltip).
@@ -3114,8 +3207,12 @@ function UnderwritersGambit() {
       return;
     }
 
-    // Underwriting vitals penalties — mirror what TermSheetPanel showed the player
+    // Underwriting vitals penalties — mirror what TermSheetPanel showed the player.
+    // (Fix F5) leverageOverFinal / overPullFinal / hpPenaltyFinal are captured into
+    // vitalsState so diagnoseOutcome can pick the killing cause for the debrief.
     let vitalsRisk = 0;
+    let leverageOverFinal = 0;
+    let overPullFinal = 0;
     if (boss.hidden.bank.revealed) {
       const monthlyRev = boss.hidden.bank.monthlyRevenue || 0;
       const positionVal = boss.hidden.position.revealed ? boss.hidden.position.value : 1;
@@ -3131,6 +3228,8 @@ function UnderwritersGambit() {
         ? (dailyDebit - holdbackCeiling) / holdbackCeiling : 0;
       if (leverageOver > 0) vitalsRisk += Math.min(30, Math.round(leverageOver * 100 * 5));
       if (overPull > 0)     vitalsRisk += Math.min(20, 12 + Math.round(overPull * 8));
+      leverageOverFinal = leverageOver;
+      overPullFinal = overPull;
     }
     // Chain (Alexander): same per-turn-cards-played multiplier the preview shows
     if (selectedUnderwriter === 'alexander' && cardsPlayedThisTurn >= 3) {
@@ -3188,6 +3287,17 @@ function UnderwritersGambit() {
     if (isCleared) setRunStats((s) => ({ ...s, cleared: s.cleared + 1 }));
     else           setRunStats((s) => ({ ...s, defaulted: s.defaulted + 1 }));
 
+    // (Fix F5) Diagnose the outcome — pick the dominant cause + lesson for the debrief.
+    // Returns null on Clean Clear / Cleared / Stressed-with-trivial-damage; non-null payload
+    // surfaces in the F1 reveal land event (headline only) and the RESOLUTION debrief block.
+    const cause = diagnoseOutcome(
+      boss,
+      offerParams,
+      { overLeverage: leverageOverFinal, overPull: overPullFinal, hpPenalty, damage, bandName },
+      finalRisk,
+      threshold,
+    );
+
     setLastOutcome({
       type: bandName.toUpperCase().replace(/ /g, '_'),
       bandName,
@@ -3202,6 +3312,7 @@ function UnderwritersGambit() {
       advance,
       msg,
       success: isCleared,
+      cause, // (Fix F5)
     });
     // (Fix F2) Cleared-deal snapshot now captures the original term-sheet levers and the day
     // it cleared, so generateRenewalBoss can build a real callback when this merchant returns.
@@ -3258,6 +3369,7 @@ function UnderwritersGambit() {
       // Phase 3 — anomaly surface. Hidden anomalies flash red (the gotchas the player missed).
       ...anomalyList,
       // Phase 4 — outcome land. Meter sweeps to finalRisk, band lock-in fires screen flash.
+      // (Fix F5) cause headline appears under the band name on bad outcomes.
       {
         type: 'land',
         duration: 1200,
@@ -3270,6 +3382,7 @@ function UnderwritersGambit() {
           damage,
           net,
           isCleared,
+          cause,
         },
       },
     ];
@@ -4460,6 +4573,20 @@ function UnderwritersGambit() {
                   <div className={`text-5xl sm:text-6xl font-black uppercase tracking-tight mb-2 ${toneClass}`}>
                     {currentEvent.payload.bandName}
                   </div>
+                  {/* (Fix F5) Cause headline — only on bad outcomes, surfaces above the
+                      money line. Tone-matches the band: red on Default/Collapse/Breach,
+                      amber on Stressed warnings. Detail/lesson land on the RESOLUTION
+                      screen — keep the reveal moment punchy. */}
+                  {currentEvent.payload.cause && (
+                    <div className="mb-3 max-w-xl mx-auto">
+                      <div className={`text-[10px] uppercase font-bold tracking-widest ${currentEvent.payload.cause.severity === 'fatal' ? 'text-red-500' : 'text-amber-500'}`}>
+                        {currentEvent.payload.cause.severity === 'fatal' ? 'Cause' : 'Close Call'}
+                      </div>
+                      <div className={`text-base font-black tracking-tight ${currentEvent.payload.cause.severity === 'fatal' ? 'text-red-300' : 'text-amber-300'}`}>
+                        {currentEvent.payload.cause.headline}
+                      </div>
+                    </div>
+                  )}
                   <div className="font-mono text-2xl font-black">
                     {currentEvent.payload.net > 0 && <span className="text-emerald-400">+{formatMoney(currentEvent.payload.net)}</span>}
                     {currentEvent.payload.net < 0 && <span className="text-red-400">{formatMoney(currentEvent.payload.net)}</span>}
@@ -4521,6 +4648,47 @@ function UnderwritersGambit() {
           {lastOutcome.summary && (
             <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800 mb-4 text-xs font-mono text-neutral-300">
               {lastOutcome.summary}
+            </div>
+          )}
+          {/* (Fix F5) Debrief block — cause + detail + lesson on bad outcomes. Calm
+              aftermath teaching moment. Reuses revealEnter keyframe for arrival. */}
+          {lastOutcome.cause && (
+            <div className={`reveal-card-enter rounded-xl border p-4 mb-4 text-left ${
+              lastOutcome.cause.severity === 'fatal'
+                ? 'bg-red-950/20 border-red-900/50'
+                : 'bg-amber-950/15 border-amber-900/50'
+            }`}>
+              <div className="flex items-baseline justify-between mb-2">
+                <div className={`text-[10px] uppercase font-bold tracking-widest ${lastOutcome.cause.severity === 'fatal' ? 'text-red-400' : 'text-amber-400'}`}>
+                  {lastOutcome.cause.severity === 'fatal' ? 'Default Cause' : 'Close-Call Cause'}
+                </div>
+                <div className={`text-[9px] uppercase font-bold tracking-widest ${
+                  lastOutcome.cause.source === 'hidden_anomaly' ? 'text-red-500'
+                  : lastOutcome.cause.source === 'visible_anomaly' ? 'text-amber-500'
+                  : lastOutcome.cause.source === 'vital' ? 'text-orange-500'
+                  : lastOutcome.cause.source === 'attribute' ? 'text-purple-500'
+                  : 'text-neutral-500'
+                }`}>
+                  {lastOutcome.cause.source === 'hidden_anomaly' ? 'Hidden — you never saw it'
+                  : lastOutcome.cause.source === 'visible_anomaly' ? 'Visible — you saw it'
+                  : lastOutcome.cause.source === 'vital' ? 'Structural mismatch'
+                  : lastOutcome.cause.source === 'attribute' ? 'Attribute weakness'
+                  : 'Combined'}
+                </div>
+              </div>
+              <div className={`text-base font-black tracking-tight mb-2 ${lastOutcome.cause.severity === 'fatal' ? 'text-red-200' : 'text-amber-200'}`}>
+                {lastOutcome.cause.headline}
+              </div>
+              <div className="text-[12px] text-neutral-300 leading-relaxed mb-3">
+                {lastOutcome.cause.detail}
+              </div>
+              <div className="border-t border-neutral-800 pt-2.5 flex items-start gap-2">
+                <BookOpen size={12} className="text-emerald-500 shrink-0 mt-0.5" />
+                <div>
+                  <div className="text-[9px] uppercase font-bold tracking-widest text-emerald-500 mb-0.5">Lesson</div>
+                  <div className="text-[12px] text-emerald-100 leading-snug">{lastOutcome.cause.lesson}</div>
+                </div>
+              </div>
             </div>
           )}
           {lastOutcome.damage > 0 && lastOutcome.grossProfit > 0 && (
