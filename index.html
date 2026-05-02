@@ -1035,6 +1035,11 @@ const RELIC_POOL = [
   { id: 'r_forensic_engine', name: 'Forensic Engine', desc: 'Forensic cards cost 1 less Energy (min 0).',                cost: 750, icon: ScrollText, archetype: 'forensic' },
   { id: 'r_aggro_battery',   name: 'Aggro Battery',   desc: 'Aggro cards deal +4 damage to the file.',                   cost: 800, icon: Zap,        archetype: 'aggro' },
   { id: 'r_reveal_toolkit',  name: 'Reveal Toolkit',  desc: 'Reveal cards apply −3 Risk modifier on play.',              cost: 700, icon: Eye,        archetype: 'reveal' },
+  // (Fix F6.5) Completing the puller set across 5 of 6 archetype classes.
+  // Decline stays uncovered intentionally — Burner Phone already incentivizes that
+  // archetype, and Decline is a tactical tool not a strategic build path.
+  { id: 'r_defensive_hedge', name: 'Defensive Hedge', desc: 'Defensive cards grant +5 Block on play.',                   cost: 700, icon: Shield,     archetype: 'defensive' },
+  { id: 'r_tempo_catalyst',  name: 'Tempo Catalyst',  desc: 'Tempo cards draw +1 extra card on play.',                   cost: 650, icon: Clock,      archetype: 'tempo' },
 ];
 
 const CONSUMABLE_POOL = [
@@ -3093,8 +3098,14 @@ function UnderwritersGambit() {
     if (card.val) {
       setEnergy((e) => e + card.val);
     }
-    if (card.draw) {
-      drawIntoHand(card.draw);
+    // (Fix F6.5) Tempo Catalyst — Tempo cards draw +1 extra card on play. Stacks with
+    // existing card.draw count (e.g., a draw-2 Tempo card with Catalyst draws 3). Fires
+    // independently if the card has no draw effect — Catalyst's bonus is unconditional
+    // for Tempo plays.
+    const tempoBonus = (relics.includes('r_tempo_catalyst') && cardClass === 'tempo') ? 1 : 0;
+    const drawCount = (card.draw || 0) + tempoBonus;
+    if (drawCount > 0) {
+      drawIntoHand(drawCount);
     }
     // Kickback (Stanley): all in-encounter commission income scales +50%
     const kickbackMult = selectedUnderwriter === 'stanley' ? 1.5 : 1;
@@ -3120,7 +3131,12 @@ function UnderwritersGambit() {
       });
     }
     const blk = deriveCardBlock(card);
-    if (blk > 0) setPlayerBlock((p) => p + blk);
+    // (Fix F6.5) Defensive Hedge — Defensive cards grant +5 Block on play. Stacks on top
+    // of card.block (Anchor + Calipers pattern from StS). Fires whether or not the card
+    // itself granted block — the relic IS the defensive instrument layer.
+    const hedgeBonus = (relics.includes('r_defensive_hedge') && cardClass === 'defensive') ? 5 : 0;
+    const totalBlock = blk + hedgeBonus;
+    if (totalBlock > 0) setPlayerBlock((p) => p + totalBlock);
   };
 
   // === End-of-turn handler ===
