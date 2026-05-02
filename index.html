@@ -1385,12 +1385,17 @@ const ABILITY_COUNTERS = {
   broker_pressure:  { counterType: 'decline',   hint: 'Counter: Decline the file' },
   cash_crisis:      { counterType: 'defensive', hint: 'Counter: play a Defensive card' },
   hide_attribute:   { counterType: 'reveal',    hint: 'Counter: play a Reveal card' },
-  // Final-boss kit — unblockable in MVP. F4.5 will design bespoke counters per phase.
-  infomercial_push: { counterType: 'none',      hint: 'Unblockable — burn HP fast' },
-  subprime_slumber: { counterType: 'none',      hint: 'Unblockable — burn HP fast' },
-  bogo_free:        { counterType: 'none',      hint: 'Unblockable — burn HP fast' },
-  legal_armor:      { counterType: 'none',      hint: 'Unblockable — burn through' },
-  pillow_talk:      { counterType: 'none',      hint: 'Unblockable — re-reveal next turn' },
+  // (Fix F4.5) Pillow Tycoon — bespoke counters per phase. Final-boss kit gets
+  // higher aggro thresholds (counterMin 10/12) so generic 8-damage cards don't
+  // trivialize the climax fight. Each counter maps a real-desk verb to the boss
+  // mechanic: audit the subprime book (forensic), break through litigation (race),
+  // re-expose the charmed attributes (reveal). Forensic-only and Reveal-only
+  // counters force the player to have the right tool — not just any damage card.
+  infomercial_push: { counterType: 'aggro',     counterMin: 10, hint: 'Race: out-burn the regen — 10+ damage' },
+  subprime_slumber: { counterType: 'forensic',                  hint: 'Counter: Forensic — audit the subprime book' },
+  bogo_free:        { counterType: 'forensic',                  hint: 'Counter: Forensic — catch the BOGO amp' },
+  legal_armor:      { counterType: 'aggro',     counterMin: 12, hint: 'Race: break the block — 12+ damage' },
+  pillow_talk:      { counterType: 'reveal',                    hint: 'Counter: re-reveal the charmed attribute' },
 };
 function getThreatCounter(intent) {
   return ABILITY_COUNTERS[intent] || { counterType: 'none', hint: '' };
@@ -1399,12 +1404,16 @@ function getThreatCounter(intent) {
 // Used by the hand-card render (counter-glow) AND playCard (defuse trigger).
 function cardCountersThreat(card, boss) {
   if (!card || !boss?.intent || boss?.threatDefused) return false;
-  const { counterType } = getThreatCounter(boss.intent);
+  const counter = getThreatCounter(boss.intent);
+  const { counterType, counterMin } = counter;
   if (counterType === 'none') return false;
   const cardClass = getCardClass(card);
   if (counterType === 'aggro') {
-    // Aggro counter = enough damage to race. Any class qualifies if damage threshold met.
-    return cardClass === 'aggro' || deriveCardDamage(card) >= 8;
+    // (Fix F4.5) Aggro race counter — damage threshold defaults to 8 but final-boss
+    // intents override via counterMin (10 for Infomercial, 12 for Lawsuit) so generic
+    // damage cards don't trivialize the climax fight.
+    const min = counterMin || 8;
+    return cardClass === 'aggro' || deriveCardDamage(card) >= min;
   }
   return cardClass === counterType;
 }
