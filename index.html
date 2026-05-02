@@ -225,6 +225,57 @@
     mix-blend-mode: multiply;
     opacity: 0.55;
   }
+
+  /* === RESOLUTION_REVEAL ANIMATIONS (Fix F1: Submit Reveal Sequence) ===
+     Retires symptoms 2 (no moment-of-truth on submit), 3 (no card-play juice on resolution),
+     and 18 (post-resolution screen as static spreadsheet). The reveal sequence is the new
+     drama beat — these keyframes drive the per-card cascade, the anomaly surface, the
+     risk-meter sweep, and the band lock-in. */
+  @keyframes revealEnter {
+    from { opacity: 0; transform: translateY(12px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0)    scale(1); }
+  }
+  @keyframes revealExit {
+    from { opacity: 1; transform: translateY(0)     scale(1); }
+    to   { opacity: 0; transform: translateY(-8px)  scale(0.97); }
+  }
+  @keyframes panelShake {
+    0%   { transform: translateX(0); }
+    20%  { transform: translateX(8px) translateY(-2px); }
+    40%  { transform: translateX(-6px) translateY(1px); }
+    60%  { transform: translateX(4px); }
+    80%  { transform: translateX(-2px); }
+    100% { transform: translateX(0); }
+  }
+  @keyframes wrapperShake {
+    0%   { transform: translate(0, 0); }
+    25%  { transform: translate(3px, -2px); }
+    50%  { transform: translate(-2px, 2px); }
+    75%  { transform: translate(2px, 1px); }
+    100% { transform: translate(0, 0); }
+  }
+  @keyframes screenFlash {
+    0%   { opacity: 0; }
+    20%  { opacity: 0.08; }
+    100% { opacity: 0; }
+  }
+  @keyframes meterPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+    50%      { box-shadow: 0 0 0 5px rgba(255,255,255,0.10); }
+  }
+  @keyframes needleSettle {
+    0%   { transform: translateX(-50%) scale(1); }
+    50%  { transform: translateX(-50%) scale(1.4); }
+    100% { transform: translateX(-50%) scale(1); }
+  }
+  .reveal-card-enter   { animation: revealEnter 200ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .reveal-card-exit    { animation: revealExit 150ms ease-in both; }
+  .reveal-shake        { animation: panelShake 100ms ease-in-out; }
+  .reveal-wrapper-shake { animation: wrapperShake 80ms ease-out; }
+  .reveal-screen-flash { animation: screenFlash 600ms ease-out; pointer-events: none; }
+  .reveal-meter-pulse  { animation: meterPulse 600ms ease-out; }
+  .reveal-needle-settle { animation: needleSettle 240ms ease-out; }
+  .risk-needle         { transition: left 800ms cubic-bezier(0.16, 1, 0.3, 1); }
 </style>
 </head>
 <body>
@@ -2137,6 +2188,27 @@ function UnderwritersGambit() {
   // Chain keyword (Alexander): every card played in a turn raises the multiplier on the next
   // played mod. Tracked per-turn, reset on endTurn / new encounter.
   const [cardsPlayedThisTurn, setCardsPlayedThisTurn] = useState(0);
+
+  // === RESOLUTION_REVEAL state (Fix F1 — Submit Reveal Sequence) ===
+  // Drives the 3–4s reveal that fires between Submit and the existing RESOLUTION screen.
+  // Replaces the instant-text-result drama hole noted in symptom 2/3/18.
+  // revealQueue: ordered events the driver effect walks through with setTimeout.
+  //   shape: [{ type: 'lock'|'card'|'anomaly'|'land', duration: ms, payload: {...} }, ...]
+  // revealStep: index of the currently-visible event (incremented as the driver advances).
+  // revealDone: true once the queue is exhausted and the player can advance to RESOLUTION.
+  // revealSkipped: latch — single click during reveal jumps straight to landed state.
+  // revealRiskNow: meter's currently-displayed risk score (animates on Phase 4 land).
+  // pendingDelta / pendingClearedDeal: capital change + cleared-deal snapshot deferred from
+  //   executeOffer until the reveal completes (or is skipped). Keeps the HUD's fund display
+  //   from updating before the player sees the math arrive.
+  const [revealQueue, setRevealQueue] = useState([]);
+  const [revealStep, setRevealStep] = useState(0);
+  const [revealDone, setRevealDone] = useState(false);
+  const [revealSkipped, setRevealSkipped] = useState(false);
+  const [revealRiskNow, setRevealRiskNow] = useState(0);
+  const [pendingDelta, setPendingDelta] = useState(0);
+  const [pendingClearedDeal, setPendingClearedDeal] = useState(null);
+  const [revealFlashTrigger, setRevealFlashTrigger] = useState(0); // bumped to retrigger screen-flash CSS
   // Combat state — turn counter and player block. Block soaks the file's next attack and resets each turn.
   const [currentTurn, setCurrentTurn] = useState(1);
   const [playerBlock, setPlayerBlock] = useState(0);
@@ -2245,11 +2317,37 @@ function UnderwritersGambit() {
     // Broker Row will eventually have its own track ('broker-row.mp3'); until that asset lands,
     // route to the intermission bed so the shop isn't dead silent.
     if (s === 'SHOP')             return base + encodeURI('Day 1.mp3');
+    // RESOLUTION_REVEAL keeps the encounter bed playing — the sweep + stinger ride OVER it,
+    // not under a different track. Same source as ENCOUNTER so audio doesn't restart mid-fight.
+    if (s === 'RESOLUTION_REVEAL') {
+      const name = (currentBoss && currentBoss.bgMusic) || 'Day 1';
+      return base + encodeURI(name + '.mp3');
+    }
     if (s === 'ENCOUNTER') {
       const name = (currentBoss && currentBoss.bgMusic) || 'Day 1';
       return base + encodeURI(name + '.mp3');
     }
     return null;
+  };
+
+  // === STINGER HOOKS (Fix F1 — forward-compatible with score brief tracks 11–15) ===
+  // Stub until stinger-clean-clear.mp3, stinger-cleared.mp3, stinger-stressed.mp3,
+  // stinger-default.mp3, stinger-collapse.mp3 ship from the audio brief. When they land,
+  // implement getStingerForBand to return the URL and wire a transient <audio> element to play.
+  const getStingerForBand = (bandName) => {
+    // No-op until score-brief stingers exist in assets/. Returns null = stinger silent.
+    // Map: { 'Clean Clear': 'stinger-clean-clear.mp3', ... }
+    return null;
+  };
+  const playStinger = (bandName) => {
+    const url = getStingerForBand(bandName);
+    if (!url) return; // stub; no asset, no sound
+    if (audioMuted) return;
+    try {
+      const a = new Audio(url);
+      a.volume = audioVolume;
+      a.play().catch(() => {});
+    } catch (_) {}
   };
 
   // Global audio control was a speaker icon in the bottom-left of every screen — removed at
@@ -2673,7 +2771,90 @@ function UnderwritersGambit() {
       success: isCleared,
     });
     const dealSnapshot = isCleared ? { ...boss, lastFactor: finalFactor, lastAdvance: advance } : null;
-    endEncounter(net, dealSnapshot);
+
+    // === Build the RESOLUTION_REVEAL queue (Fix F1) =====================================
+    // Retires symptoms 2 (no submit drama), 3 (no card-play juice on resolution), 18 (post-
+    // resolution screen as static spreadsheet). The cascade narrates contributions in order;
+    // the meter sweep + band lock land in Phase 4. Side-effects (capital/commission/runStats)
+    // are stashed in pendingDelta and applied when the reveal completes — the HUD's fund
+    // display doesn't change until the player has watched the math arrive.
+    const breakdown = evaluateModsBreakdown(activeMods, ctx);
+    const cardEvents = breakdown
+      .filter((b) => Math.abs(b.risk) > 0.5 || Math.abs(b.factor) > 0.005)
+      .map((b) => ({
+        type: 'card',
+        duration: breakdown.length > 6 ? 125 : 250,
+        payload: { name: b.name, risk: b.risk, factor: b.factor },
+      }));
+    const anomalyList = (boss.anomalies || []).map((aId) => {
+      const a = ANOMALY_TYPES[aId];
+      if (!a) return null;
+      return {
+        type: 'anomaly',
+        duration: (boss.anomalies.length > 4) ? 175 : 300,
+        payload: {
+          id: aId,
+          label: a.label,
+          risk: a.risk,
+          wasHidden: !boss.anomaliesRevealed,
+        },
+      };
+    }).filter(Boolean);
+
+    const queue = [
+      // Phase 1 — term sheet locks. Instant visual; meter shows zero, baseline contribution
+      // appears as a single non-card "Term Sheet" event that anchors the cascade.
+      {
+        type: 'lock',
+        duration: 500,
+        payload: { sliderRisk: Math.round(sliderRisk + relicRisk + vitalsRisk + hpPenalty) },
+      },
+      // Phase 2 — per-card cascade. Empty queue collapses to no entries (auto-decline path).
+      ...cardEvents,
+      // Phase 3 — anomaly surface. Hidden anomalies flash red (the gotchas the player missed).
+      ...anomalyList,
+      // Phase 4 — outcome land. Meter sweeps to finalRisk, band lock-in fires screen flash.
+      {
+        type: 'land',
+        duration: 1200,
+        payload: {
+          finalRisk: Math.round(finalRisk),
+          threshold,
+          bandName,
+          bandTone,
+          profit,
+          damage,
+          net,
+          isCleared,
+        },
+      },
+    ];
+
+    // Stash side-effects until reveal completes
+    setPendingDelta(net);
+    setPendingClearedDeal(dealSnapshot);
+    // Run-stats also stashed — applied in finalizeReveal below
+    if (isCleared) setRunStats((s) => ({ ...s, cleared: s.cleared + 1 }));
+    else           setRunStats((s) => ({ ...s, defaulted: s.defaulted + 1 }));
+
+    // Reset reveal state and arm the queue
+    setRevealQueue(queue);
+    setRevealStep(0);
+    setRevealDone(false);
+    setRevealSkipped(false);
+    setRevealRiskNow(0);
+    setRevealFlashTrigger(0);
+    setGameState('RESOLUTION_REVEAL');
+  };
+
+  // === Finalize reveal (Fix F1) =======================================================
+  // Called when the queue completes naturally OR when the player clicks to skip. Applies
+  // the deferred capital/commission/cleared-deal updates and transitions to the existing
+  // RESOLUTION screen for the calm aftermath.
+  const finalizeReveal = () => {
+    // endEncounter applies capital + commission + cleared-deal-record + clears hand/piles
+    endEncounter(pendingDelta, pendingClearedDeal);
+    // No need to clear pending* — executeOffer overwrites them on next submit
   };
 
   // === Encounter resolution ===
@@ -2917,6 +3098,69 @@ function UnderwritersGambit() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // === RESOLUTION_REVEAL driver effect (Fix F1) =====================================
+  // Walks revealQueue via chained setTimeouts. Each event advances revealStep, which the
+  // RESOLUTION_REVEAL JSX reads to render the cascade overlay + meter sweep + flash.
+  // Skip latch: revealSkipped → jump immediately to the land event's settled state.
+  // Cleanup: cancels timeouts on gameState change (so leaving the screen doesn't fire stale
+  // updates).
+  useEffect(() => {
+    if (gameState !== 'RESOLUTION_REVEAL') return;
+    if (!revealQueue.length) return;
+    if (revealDone) return;
+
+    const timeouts = [];
+    let cumulative = 0;
+
+    const advance = (toStep) => {
+      const ev = revealQueue[toStep];
+      if (!ev) return;
+      setRevealStep(toStep);
+      // On 'land' event: trigger the meter sweep + screen flash + stinger + finalize side-effects.
+      if (ev.type === 'land') {
+        setRevealRiskNow(ev.payload.finalRisk);
+        setRevealFlashTrigger((n) => n + 1);
+        playStinger(ev.payload.bandName);
+      }
+    };
+
+    if (revealSkipped) {
+      // Skip latch — jump straight to the land event's settled state. Player still has to
+      // tap once more to advance to RESOLUTION (so they read the band name before moving on).
+      const landIdx = revealQueue.findIndex((e) => e.type === 'land');
+      const landEvent = revealQueue[landIdx];
+      if (landEvent) {
+        // Use a single timeout so React batches the state updates cleanly.
+        timeouts.push(setTimeout(() => {
+          setRevealStep(landIdx);
+          setRevealRiskNow(landEvent.payload.finalRisk);
+          setRevealFlashTrigger((n) => n + 1);
+          playStinger(landEvent.payload.bandName);
+          setRevealDone(true);
+        }, 0));
+      } else {
+        setRevealDone(true);
+      }
+    } else {
+      // Walk the queue with cumulative timeouts.
+      revealQueue.forEach((ev, idx) => {
+        timeouts.push(setTimeout(() => advance(idx), cumulative));
+        cumulative += ev.duration;
+      });
+      // After the final event's duration, mark done. Player taps to advance to RESOLUTION;
+      // finalizeReveal fires from the click handler. This pause gives the band landing
+      // time to register before the screen changes — Slay-the-Spire's per-encounter end-card.
+      timeouts.push(setTimeout(() => {
+        setRevealDone(true);
+      }, cumulative + 50));
+    }
+
+    return () => {
+      timeouts.forEach((t) => clearTimeout(t));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameState, revealQueue, revealSkipped]);
 
   // Track-switch effect — keyed on gameState AND boss.bgMusic so a new boss with a different
   // theme triggers a switch. Same-track re-renders are silent (no restart).
@@ -3636,6 +3880,153 @@ function UnderwritersGambit() {
     );
   }
 
+  // === RESOLUTION_REVEAL screen (Fix F1) ===========================================
+  // Sits between Submit and the calm RESOLUTION aftermath screen. Renders the locked
+  // file panel + locked term sheet + Risk Meter + Card Cascade overlay. Click anywhere
+  // to skip to the settled state. Retires symptoms 2 / 3 / 18.
+  if (gameState === 'RESOLUTION_REVEAL') {
+    const currentEvent = revealQueue[revealStep];
+    const landEvent = revealQueue.find((e) => e.type === 'land');
+    const lockEvent = revealQueue.find((e) => e.type === 'lock');
+    const threshold = landEvent?.payload.threshold ?? (boss?.riskThreshold ?? 35);
+    const meterMax = 120; // risk is clamped 0–120 in executeOffer
+    const thresholdPct = (threshold / meterMax) * 100;
+    const stressedPct = Math.min(100, ((threshold + 15) / meterMax) * 100);
+    const breachPct = Math.min(100, ((threshold + 30) / meterMax) * 100);
+    const collapsePct = Math.min(100, ((threshold + 50) / meterMax) * 100);
+    const needlePct = Math.min(100, (revealRiskNow / meterMax) * 100);
+    const isLanded = currentEvent?.type === 'land' || revealDone;
+    const bandTone = landEvent?.payload.bandTone || 'neutral';
+    const toneClass = bandTone === 'emerald' ? 'text-emerald-400'
+      : bandTone === 'amber' ? 'text-amber-400'
+      : bandTone === 'red' ? 'text-red-400' : 'text-neutral-300';
+    const skip = () => {
+      if (revealDone) {
+        finalizeReveal();
+        return;
+      }
+      setRevealSkipped(true);
+    };
+
+    return (
+      <div onClick={skip} className="min-h-screen bg-neutral-950 text-neutral-200 font-sans flex flex-col cursor-pointer select-none">
+        {/* Screen flash overlay — keyed by revealFlashTrigger to retrigger animation on land */}
+        {revealFlashTrigger > 0 && (
+          <div key={revealFlashTrigger} className="fixed inset-0 bg-white reveal-screen-flash z-50" />
+        )}
+        <div className={isLanded ? 'reveal-wrapper-shake flex-1 flex flex-col' : 'flex-1 flex flex-col'}>
+          {/* Locked file header — same shape as encounter HUD, but read-only */}
+          <header className="px-4 sm:px-6 py-3 flex justify-between items-center border-b border-neutral-800 bg-neutral-900/50">
+            <div>
+              <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">Submitted</div>
+              <div className="text-sm sm:text-base font-black text-white">{boss?.merchantName || boss?.industry || 'Merchant File'}</div>
+            </div>
+            <div className="text-right">
+              <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">Day {day}</div>
+              <div className="text-xs text-neutral-500 italic">{revealDone ? 'Tap to continue' : 'Tap to skip'}</div>
+            </div>
+          </header>
+
+          <div className="flex-1 flex flex-col justify-center items-center px-4 sm:px-8 py-6 max-w-3xl mx-auto w-full">
+            {/* Risk Meter — horizontal bar, 4 marked thresholds, animated needle */}
+            <div className="w-full mb-6">
+              <div className="flex items-baseline justify-between mb-2">
+                <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500">Risk vs Threshold</div>
+                <div className={`text-3xl font-black font-mono ${isLanded ? toneClass : 'text-neutral-300'} transition-colors duration-300`}>
+                  {Math.round(revealRiskNow)}
+                </div>
+              </div>
+              <div className={`relative w-full h-8 rounded-lg border border-neutral-800 overflow-hidden ${isLanded ? 'reveal-meter-pulse' : ''}`}
+                   style={{ background: `linear-gradient(to right,
+                     rgb(16,185,129) 0%, rgb(16,185,129) ${thresholdPct}%,
+                     rgb(245,158,11) ${thresholdPct}%, rgb(245,158,11) ${stressedPct}%,
+                     rgb(239,68,68) ${stressedPct}%, rgb(239,68,68) ${breachPct}%,
+                     rgb(153,27,27) ${breachPct}%, rgb(153,27,27) ${collapsePct}%,
+                     rgb(69,10,10) ${collapsePct}%, rgb(69,10,10) 100%)`,
+                     opacity: 0.55 }}>
+                {/* Threshold tick — vertical line at the file's clean-clear cutoff */}
+                <div className="absolute top-0 bottom-0 w-px bg-white/60" style={{ left: `${thresholdPct}%` }} />
+                {/* Needle — animates left position via CSS transition */}
+                <div className={`absolute top-0 bottom-0 w-1 bg-white risk-needle ${isLanded ? 'reveal-needle-settle' : ''}`}
+                     style={{ left: `${needlePct}%`, transform: 'translateX(-50%)', boxShadow: '0 0 8px rgba(255,255,255,0.6)' }} />
+              </div>
+              <div className="flex justify-between text-[9px] uppercase tracking-widest text-neutral-600 mt-1.5 font-bold">
+                <span>Clear</span>
+                <span style={{ marginLeft: `${thresholdPct - 4}%` }}>· Threshold {threshold} ·</span>
+                <span>Collapse</span>
+              </div>
+            </div>
+
+            {/* Card Cascade — current event display. One element at a time. */}
+            <div className="w-full min-h-[7rem] flex items-center justify-center">
+              {currentEvent && currentEvent.type === 'lock' && (
+                <div key={`step-${revealStep}`} className="reveal-card-enter bg-neutral-900 border border-neutral-700 rounded-2xl px-6 py-4 text-center">
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500 mb-1">Term Sheet Locked</div>
+                  <div className="text-base text-neutral-300">Base contribution from your offer terms</div>
+                  <div className="font-mono text-2xl font-black mt-2 text-neutral-200">
+                    {currentEvent.payload.sliderRisk >= 0 ? '+' : ''}{currentEvent.payload.sliderRisk} <span className="text-xs text-neutral-500">Risk</span>
+                  </div>
+                </div>
+              )}
+              {currentEvent && currentEvent.type === 'card' && (
+                <div key={`step-${revealStep}`} className="reveal-card-enter bg-neutral-900 border border-neutral-700 rounded-2xl px-6 py-4 text-center min-w-[14rem]">
+                  <div className="text-[10px] uppercase font-bold tracking-widest text-neutral-500 mb-1">Card Played</div>
+                  <div className="text-base font-black text-white">{currentEvent.payload.name}</div>
+                  <div className="font-mono text-xl font-black mt-2 flex justify-center gap-3">
+                    {Math.abs(currentEvent.payload.risk) > 0.5 && (
+                      <span className={currentEvent.payload.risk < 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        {currentEvent.payload.risk > 0 ? '+' : ''}{Math.round(currentEvent.payload.risk)} <span className="text-[10px] text-neutral-500">Risk</span>
+                      </span>
+                    )}
+                    {Math.abs(currentEvent.payload.factor) > 0.005 && (
+                      <span className={currentEvent.payload.factor > 0 ? 'text-amber-400' : 'text-cyan-400'}>
+                        {currentEvent.payload.factor > 0 ? '+' : ''}{currentEvent.payload.factor.toFixed(2)} <span className="text-[10px] text-neutral-500">Factor</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {currentEvent && currentEvent.type === 'anomaly' && (
+                <div key={`step-${revealStep}`} className={`reveal-card-enter reveal-shake border rounded-2xl px-6 py-4 text-center min-w-[14rem] ${currentEvent.payload.wasHidden ? 'bg-red-950/40 border-red-700/60' : 'bg-neutral-900 border-amber-700/50'}`}>
+                  <div className={`text-[10px] uppercase font-bold tracking-widest mb-1 ${currentEvent.payload.wasHidden ? 'text-red-400' : 'text-amber-400'}`}>
+                    {currentEvent.payload.wasHidden ? 'Anomaly · Hidden' : 'Anomaly · Known'}
+                  </div>
+                  <div className="text-base font-black text-white">{currentEvent.payload.label}</div>
+                  <div className="font-mono text-xl font-black mt-2">
+                    <span className={currentEvent.payload.wasHidden ? 'text-red-400' : 'text-amber-400'}>
+                      +{currentEvent.payload.risk} <span className="text-[10px] text-neutral-500">Risk</span>
+                    </span>
+                  </div>
+                </div>
+              )}
+              {currentEvent && currentEvent.type === 'land' && (
+                <div key={`step-${revealStep}`} className="reveal-card-enter text-center">
+                  <div className={`text-5xl sm:text-6xl font-black uppercase tracking-tight mb-2 ${toneClass}`}>
+                    {currentEvent.payload.bandName}
+                  </div>
+                  <div className="font-mono text-2xl font-black">
+                    {currentEvent.payload.net > 0 && <span className="text-emerald-400">+{formatMoney(currentEvent.payload.net)}</span>}
+                    {currentEvent.payload.net < 0 && <span className="text-red-400">{formatMoney(currentEvent.payload.net)}</span>}
+                    {currentEvent.payload.net === 0 && <span className="text-neutral-500">$0</span>}
+                  </div>
+                  {currentEvent.payload.damage > 0 && currentEvent.payload.profit > 0 && (
+                    <div className="text-xs text-neutral-500 font-mono mt-2">
+                      Profit {formatMoney(currentEvent.payload.profit)} · Damage −{formatMoney(currentEvent.payload.damage)}
+                    </div>
+                  )}
+                  {revealDone && (
+                    <div className="text-[11px] uppercase tracking-widest text-neutral-500 mt-6 animate-pulse font-bold">Tap to continue</div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+        {globalAudioControlJsx}
+      </div>
+    );
+  }
+
   if (gameState === 'RESOLUTION') {
     const isBlocked = lastOutcome?.blocked;
     const success = lastOutcome?.success;
@@ -3666,42 +4057,25 @@ function UnderwritersGambit() {
           </h1>
           <p className="text-neutral-400 text-sm sm:text-base mb-6">{lastOutcome.msg}</p>
 
+          {/* Compressed (Fix F1): Risk / Threshold / Over-By stat grid REMOVED — the reveal
+              sequence just showed the player exactly that on the meter. Keeping the same
+              numbers here was the static-spreadsheet failure called out in symptom 18. The
+              term-sheet summary string stays because it's the only reference to what the
+              actual offer looked like. The net-money line below is the post-reveal aftermath. */}
           {lastOutcome.summary && (
             <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800 mb-4 text-xs font-mono text-neutral-300">
               {lastOutcome.summary}
             </div>
           )}
-
-          {lastOutcome.riskScore != null && (
-            <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 mb-6 text-xs">
-              <div className="grid grid-cols-3 gap-2 mb-3">
-                <div>
-                  <div className="text-[9px] uppercase tracking-widest text-neutral-500">Final Risk</div>
-                  <div className={`font-mono font-bold text-xl ${toneText[tone]}`}>{lastOutcome.riskScore}</div>
-                </div>
-                <div>
-                  <div className="text-[9px] uppercase tracking-widest text-neutral-500">Threshold</div>
-                  <div className="font-mono font-bold text-xl text-neutral-300">{lastOutcome.threshold ?? '—'}</div>
-                </div>
-                <div>
-                  <div className="text-[9px] uppercase tracking-widest text-neutral-500">Over By</div>
-                  <div className={`font-mono font-bold text-xl ${lastOutcome.riskOver > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{lastOutcome.riskOver ?? 0}</div>
-                </div>
+          {lastOutcome.damage > 0 && lastOutcome.grossProfit > 0 && (
+            <div className="grid grid-cols-2 gap-2 mb-6 text-xs">
+              <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800">
+                <div className="text-[9px] uppercase tracking-widest text-emerald-500">Profit Booked</div>
+                <div className="font-mono font-bold text-base text-emerald-400">{formatMoney(lastOutcome.grossProfit)}</div>
               </div>
-              {lastOutcome.damage > 0 && (
-                <div className="grid grid-cols-2 gap-2 pt-3 border-t border-neutral-800">
-                  <div>
-                    <div className="text-[9px] uppercase tracking-widest text-emerald-500">Profit Booked</div>
-                    <div className="font-mono font-bold text-base text-emerald-400">{formatMoney(lastOutcome.grossProfit ?? 0)}</div>
-                  </div>
-                  <div>
-                    <div className="text-[9px] uppercase tracking-widest text-red-500">Capital Damage</div>
-                    <div className="font-mono font-bold text-base text-red-400">−{formatMoney(lastOutcome.damage)}</div>
-                  </div>
-                </div>
-              )}
-              <div className="text-[10px] text-neutral-500 mt-3 leading-snug">
-                Risk above threshold = damage to Capital, scaled by advance. Profit is paid in full at clean reads, scaled down as risk climbs. No dice — every point you mitigated was one point off the damage.
+              <div className="bg-neutral-950 p-3 rounded-xl border border-neutral-800">
+                <div className="text-[9px] uppercase tracking-widest text-red-500">Capital Damage</div>
+                <div className="font-mono font-bold text-base text-red-400">−{formatMoney(lastOutcome.damage)}</div>
               </div>
             </div>
           )}
