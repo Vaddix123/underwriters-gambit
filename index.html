@@ -276,6 +276,21 @@
   .reveal-meter-pulse  { animation: meterPulse 600ms ease-out; }
   .reveal-needle-settle { animation: needleSettle 240ms ease-out; }
   .risk-needle         { transition: left 800ms cubic-bezier(0.16, 1, 0.3, 1); }
+
+  /* === CARD-SLIDER FUSION (Fix F3) ===
+     synergyPulse: amber breathing ring on hand cards with strong active synergy.
+     riskTickFlash: 200ms color flash on the live risk number when card or slider drives an update.
+     liveNeedleSlide: shorter transition for the in-encounter mini meter (150ms feels live,
+     not the dramatic 800ms used on RESOLUTION_REVEAL's land sweep). */
+  @keyframes synergyPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(251,191,36,0.0), 0 0 12px 0 rgba(251,191,36,0.0); }
+    50%      { box-shadow: 0 0 0 2px rgba(251,191,36,0.55), 0 0 16px 2px rgba(251,191,36,0.35); }
+  }
+  @keyframes riskTickFlashCard   { 0% { color: rgb(34,211,238); } 100% { color: inherit; } }
+  @keyframes riskTickFlashSlider { 0% { color: rgb(251,191,36); } 100% { color: inherit; } }
+  .synergy-active { box-shadow: 0 0 0 2px rgba(34,211,238,0.5), 0 0 10px 0 rgba(34,211,238,0.25); }
+  .synergy-strong { animation: synergyPulse 1.4s ease-in-out infinite; }
+  .live-needle    { transition: left 150ms cubic-bezier(0.4, 0, 0.2, 1); }
 </style>
 </head>
 <body>
@@ -1113,6 +1128,55 @@ function evaluateMods(activeMods, ctx) {
   let risk = 0, factor = 0;
   for (const p of parts) { risk += p.risk; factor += p.factor; }
   return { risk, factor };
+}
+
+// (Fix F3) Card-Slider Fusion — synergy detection for hand cards.
+// Returns { active, strong } so the UI can render a tiered glow on cards whose
+// conditions favor playing them at the current state. active = ring; strong = pulse.
+// Retires symptom 4 (cards/sliders feel like two systems) and partial 8 (info density
+// without signal — the glow tells the player which cards matter NOW without forcing
+// them to read every effect line).
+function evaluateCardSynergy(card, ctx) {
+  if (!card || !ctx) return { active: false, strong: false };
+  const m = card.mod || {};
+  let activeCount = 0;
+  let strongScore = 0;
+
+  // Scaling on revealed attributes
+  if ((m.perRevealedRisk || m.perRevealedFactor) && ctx.revealedCount > 0) {
+    activeCount++;
+    if (ctx.revealedCount >= 3) strongScore += 2;
+  }
+  // Scaling on visible anomalies
+  if ((m.perAnomalyRisk || m.perAnomalyFactor) && ctx.anomalyCount > 0) {
+    activeCount++;
+    if (ctx.anomalyCount >= 2) strongScore += 2;
+  }
+  // Scaling on stack of other active mods
+  if ((m.perActiveModRisk || m.perActiveModFactor) && ctx.modCount > 1) {
+    activeCount++;
+    if (ctx.modCount >= 3) strongScore += 1;
+  }
+  // Conditional bonuses (factor_at_cap, stacking_visible, is_renewal, etc.)
+  if (m.condition && evalCondition(m.condition, ctx)) {
+    activeCount++;
+    strongScore += 1;
+  }
+  // Pari passu bonus: position 2+ visible
+  if (m.paripassu && ctx.boss?.hidden?.position?.value >= 2) {
+    activeCount++;
+    if (ctx.boss.hidden.position.revealed) strongScore += 1;
+  }
+  // REVEAL cards: always "active" if their target is currently unrevealed and reachable
+  // (the existing canPlay check covers reachability; here we just flag "useful right now")
+  if (card.type === 'REVEAL') {
+    activeCount = activeCount; // no synergy boost from base reveals — they're flat utility
+  }
+
+  return {
+    active: activeCount >= 1,
+    strong: activeCount >= 2 || strongScore >= 2,
+  };
 }
 
 // === Underwriting vitals (real platform mirrors) ===
@@ -2237,6 +2301,20 @@ function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, 
   const aprColor = apr > 200 ? 'text-red-400' : apr > 120 ? 'text-amber-400' : 'text-emerald-400';
   const riskColor = visibleRisk >= 50 ? 'text-red-400' : visibleRisk >= 30 ? 'text-amber-400' : 'text-emerald-400';
 
+  // (Fix F3 — Card-Slider Fusion) Live Risk Meter — single unified feedback element for
+  // the encounter loop. Same band gradient as F1's RESOLUTION_REVEAL meter so the player
+  // recognizes it on submit. Updates instantly on card play OR slider drag (no debounce —
+  // React's batched re-render is fine at 60fps for these state shapes).
+  // Retires symptoms 4 (cards/sliders feel like two systems), 19 (sticky slider defaults
+  // — meter feedback now rewards moving them), partial 8 (info density without signal).
+  const meterMax = 120;
+  const threshold = boss.riskThreshold || 35;
+  const thresholdPct = (threshold / meterMax) * 100;
+  const stressedPct = Math.min(100, ((threshold + 15) / meterMax) * 100);
+  const breachPct = Math.min(100, ((threshold + 30) / meterMax) * 100);
+  const collapsePct = Math.min(100, ((threshold + 50) / meterMax) * 100);
+  const needlePct = Math.min(100, (visibleRisk / meterMax) * 100);
+
   return (
     <div className="bg-neutral-900 border border-neutral-700 rounded-xl p-3 sm:p-4">
       <div className="flex items-center justify-between mb-2">
@@ -2245,6 +2323,30 @@ function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, 
         </div>
         <div className="text-[10px] uppercase tracking-widest text-neutral-500">
           State Cap: <span className="font-mono font-bold text-neutral-300">{factorCap.toFixed(2)}</span>
+        </div>
+      </div>
+
+      {/* (Fix F3) Live Risk Meter — top of panel, always visible. */}
+      <div className="mb-3 pb-3 border-b border-neutral-800">
+        <div className="flex items-baseline justify-between mb-1.5">
+          <div className="text-[10px] uppercase tracking-widest text-neutral-500 font-bold">
+            Risk vs Threshold <span className="font-mono text-neutral-400">{threshold}</span>
+          </div>
+          <div className={`text-2xl font-black font-mono leading-none ${riskColor} transition-colors duration-200`}>
+            {visibleRisk}
+          </div>
+        </div>
+        <div className="relative w-full h-3.5 rounded-md border border-neutral-800 overflow-hidden"
+             style={{ background: `linear-gradient(to right,
+               rgb(16,185,129) 0%, rgb(16,185,129) ${thresholdPct}%,
+               rgb(245,158,11) ${thresholdPct}%, rgb(245,158,11) ${stressedPct}%,
+               rgb(239,68,68) ${stressedPct}%, rgb(239,68,68) ${breachPct}%,
+               rgb(153,27,27) ${breachPct}%, rgb(153,27,27) ${collapsePct}%,
+               rgb(69,10,10) ${collapsePct}%, rgb(69,10,10) 100%)`,
+               opacity: 0.55 }}>
+          <div className="absolute top-0 bottom-0 w-px bg-white/60" style={{ left: `${thresholdPct}%` }} />
+          <div className="absolute top-0 bottom-0 w-1 bg-white live-needle"
+               style={{ left: `${needlePct}%`, transform: 'translateX(-50%)', boxShadow: '0 0 6px rgba(255,255,255,0.6)' }} />
         </div>
       </div>
 
@@ -2295,32 +2397,29 @@ function TermSheetPanel({ boss, params, setParams, activeMods, relics, capital, 
         <PreviewStat label="Daily Pmt" value={formatMoney(dailyDebit)} />
         <PreviewStat label="Est APR"   value={`${Math.round(apr)}%`}   valueColor={aprColor} />
         {(() => {
-          // Risk-as-damage preview (StS Block). Above-threshold risk = projected Capital damage.
-          // The number IS the math — every point of mitigation is one point off the damage roll.
-          const threshold = boss.riskThreshold || 35;
+          // (Fix F3) The standalone risk number used to live here as a button. The Live Risk
+          // Meter at the top of the panel now owns risk display — this slot becomes a
+          // projected-damage readout + breakdown trigger. Single number, single meter, no
+          // duplicate "Risk: 47" appearing twice on the same panel.
           const riskOver = Math.max(0, visibleRisk - threshold);
           const projectedDamage = riskOver > 0 ? Math.floor((riskOver / 100) * advance) : 0;
-          const tone = riskOver === 0    ? 'emerald'
-                      : riskOver <= 15   ? 'emerald'
-                      : riskOver <= 30   ? 'amber'
-                      :                    'red';
+          const tone = riskOver === 0 || riskOver <= 15 ? 'emerald' : riskOver <= 30 ? 'amber' : 'red';
           const toneText   = tone === 'emerald' ? 'text-emerald-400' : tone === 'amber' ? 'text-amber-400' : 'text-red-400';
           const toneBorder = tone === 'emerald' ? 'border-emerald-900/50' : tone === 'amber' ? 'border-amber-900/50' : 'border-red-900/50';
           return (
             <button
               onClick={() => setShowBreakdown((s) => !s)}
               className={`bg-neutral-950/60 px-2 py-1.5 rounded border ${toneBorder} text-left hover:border-neutral-600 transition-colors`}
-              title={`Risk above the file's threshold becomes Capital damage on submit. Mitigation is real — every point shaved is one point off the damage. Click for breakdown.`}
+              title="Projected Capital damage on submit if risk lands here. Click for full breakdown."
             >
               <div className="text-[9px] uppercase tracking-widest text-neutral-500 font-bold leading-tight flex items-center gap-1">
-                Risk / Thresh <Info size={9} className="opacity-60" />
+                Proj. Damage <Info size={9} className="opacity-60" />
               </div>
-              <div className="flex items-baseline gap-1 mt-0.5">
-                <span className={`text-sm font-mono font-bold leading-tight ${riskColor}`}>{visibleRisk}</span>
-                <span className="text-[10px] font-mono text-neutral-500">/{threshold}</span>
-              </div>
-              <div className={`text-[10px] font-bold leading-tight ${toneText}`}>
+              <div className={`text-sm font-mono font-bold leading-tight mt-0.5 ${toneText}`}>
                 {riskOver === 0 ? 'CLEAN' : `−${formatMoney(projectedDamage)}`}
+              </div>
+              <div className="text-[10px] font-mono text-neutral-500 leading-tight">
+                {riskOver === 0 ? 'no damage' : `over by ${riskOver}`}
               </div>
             </button>
           );
@@ -4677,10 +4776,23 @@ function UnderwritersGambit() {
               const targetUnplayable = (card.type === 'REVEAL' || (card.type === 'UTILITY' && card.target)) && !canRevealTarget(card.target);
               const canPlay = energy >= card.energy && !targetUnplayable;
               const isInspected = inspectedCardId === card.uid;
+              // (Fix F3) Synergy glow — scan card conditions vs. live ctx. cyan ring when one
+              // condition is active; amber pulse when synergy is strong (multi-condition or
+              // high-magnitude scaling). Disabled cards don't glow even if synergy is hot —
+              // the gray-out wins (UX consistency: glow implies "play me now").
+              const synergyCtx = boss ? {
+                boss,
+                factorVal: offerParams.factor,
+                revealedCount: countRevealed(boss),
+                anomalyCount: countAnomaliesVisible(boss),
+                modCount: activeMods.length,
+              } : null;
+              const synergy = canPlay && synergyCtx ? evaluateCardSynergy(card, synergyCtx) : { active: false, strong: false };
+              const synergyClass = synergy.strong ? 'synergy-strong' : synergy.active ? 'synergy-active' : '';
               return (
                 <div key={card.uid} className="relative">
                   <button onClick={() => playCard(idx)} disabled={!canPlay}
-                    className={`relative w-24 sm:w-32 h-36 sm:h-40 rounded-lg border flex flex-col p-2 transition-all transform hover:-translate-y-1 shadow-xl text-left ${card.color} ${
+                    className={`relative w-24 sm:w-32 h-36 sm:h-40 rounded-lg border flex flex-col p-2 transition-all transform hover:-translate-y-1 shadow-xl text-left ${card.color} ${synergyClass} ${
                       canPlay ? 'hover:shadow-[0_0_20px_rgba(255,255,255,0.1)] cursor-pointer' : 'opacity-40 grayscale cursor-not-allowed'
                     }`}>
                     <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-black/50 flex items-center justify-center font-bold text-[10px]">
