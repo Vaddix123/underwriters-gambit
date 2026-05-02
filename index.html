@@ -1851,6 +1851,15 @@ function generateScamFile(day, clearedDeals) {
   const baseRisk = industry.baseRisk + dayDifficulty(day) + state.riskMod + iso.riskMod
     + fico.risk + tib.risk + positionRisk + bankRisk;
 
+  // (Fix F10) ISO Tip mechanic — scam-mini-boss mechanical signature.
+  // The Boiler Room ISO tipping you off names ONE anomaly as the tip, but 30% of the
+  // time the tip is a red herring (the broker is lying about which anomaly is the
+  // real threat to push fraud through). Forensic Review verifies. Trusting a real tip
+  // = +$300 commission bonus. Trusting a red herring = +25 hidden risk at submit.
+  // Retires symptom 16 (scam mini-boss is mechanically identical to a normal file).
+  const tipAnomaly = anomalies[Math.floor(Math.random() * anomalies.length)];
+  const tipIsRed = Math.random() < 0.30;
+
   const file = {
     uid: 'f_scam_' + Math.random().toString(36).slice(2, 9),
     name: `Suspicious Tip-off — ${industry.name}`,
@@ -1870,6 +1879,11 @@ function generateScamFile(day, clearedDeals) {
     },
     anomalies,
     anomaliesRevealed: false,
+    // (Fix F10) Tip state — initialized at file creation, mutated by Forensic Review and
+    // executeOffer's scam-submission branch.
+    tipAnomaly,
+    tipIsRed,
+    tipVerified: false,
   };
   return attachCombatStats(file, day, true);
 }
@@ -3004,7 +3018,9 @@ function UnderwritersGambit() {
   // Operates on a single setBoss(b => ...) so multiple effects in one card stay atomic.
   const applyRevealToBoss = (b, target) => {
     if (Array.isArray(target)) return target.reduce((acc, t) => applyRevealToBoss(acc, t), b);
-    if (target === 'forensic')   return { ...b, anomaliesRevealed: true, forgedDocs: false };
+    // (Fix F10) Forensic Review on a scam file also verifies the ISO tip — flips the
+    // tip badge from amber (unverified) to emerald (real) or red (busted).
+    if (target === 'forensic')   return { ...b, anomaliesRevealed: true, forgedDocs: false, tipVerified: true };
     if (target === 'iso')        return { ...b, isoTierRevealed: true };
     if (target === 'all_basic') {
       return { ...b, hidden: {
@@ -3290,6 +3306,14 @@ function UnderwritersGambit() {
     if (selectedUnderwriter === 'alexander' && cardsPlayedThisTurn >= 3) {
       vitalsRisk += (cardsPlayedThisTurn - 2) * -3;
     }
+    // (Fix F10) Scam tip — submitted without Forensic Review (tipVerified=false). If the
+    // tipper lied (tipIsRed), apply silent +25 risk at submit. The trust-the-tip
+    // commission bonus is paid in endEncounter when the deal clears (see below).
+    let scamTrustBonus = 0;
+    if (boss.isScam && !boss.tipVerified) {
+      if (boss.tipIsRed) vitalsRisk += 25;
+      else               scamTrustBonus = 300;
+    }
     // Hedge (Branden): bonus for hybrid mods (both risk-trim AND factor adjustment)
     if (selectedUnderwriter === 'branden') {
       const hedgeCount = activeMods.filter((m) => m.risk && m.risk < 0 && m.factor).length;
@@ -3368,6 +3392,9 @@ function UnderwritersGambit() {
       msg,
       success: isCleared,
       cause, // (Fix F5)
+      scamTrustBonus, // (Fix F10) — paid in proceedFromResolution if cleared & non-zero
+      tipWasRed: boss.isScam ? !!boss.tipIsRed : false, // (Fix F10) — exposes whether the trust paid off
+      tipVerified: boss.isScam ? !!boss.tipVerified : null, // (Fix F10)
     });
     // (Fix F2) Cleared-deal snapshot now captures the original term-sheet levers and the day
     // it cleared, so generateRenewalBoss can build a real callback when this merchant returns.
@@ -3507,6 +3534,13 @@ function UnderwritersGambit() {
     if (cleared && wasScam) {
       const scamBonus = selectedUnderwriter === 'stanley' ? 750 : 500; // Kickback (+50%)
       setCommission((c) => c + scamBonus);
+      // (Fix F10) Trust-the-tip bonus — paid only when player submitted without Forensic
+      // Review AND the tip was real. lastOutcome.scamTrustBonus is 0 when verified or red.
+      const trustBonus = lastOutcome?.scamTrustBonus || 0;
+      if (trustBonus > 0) {
+        const trustBonusFinal = selectedUnderwriter === 'stanley' ? Math.floor(trustBonus * 1.5) : trustBonus;
+        setCommission((c) => c + trustBonusFinal);
+      }
     }
 
     // (Fix F6) Multi-pick draft. Pool size + pick count + rare guarantees scale by encounter
@@ -4970,6 +5004,54 @@ function UnderwritersGambit() {
               </div>
             </div>
           </div>
+
+          {/* (Fix F10) ISO TIP strip — only renders on scam files. Pre-revealed anomaly
+              named by the Boiler Room ISO as the "tip." 30% are red herrings. Forensic
+              Review verifies; verified state changes badge color. Trust = +$300 commission
+              if real, +25 risk if red herring. Decision tension is the scam-mini-boss
+              mechanical signature. */}
+          {boss.isScam && boss.tipAnomaly && (() => {
+            const tipInfo = ANOMALY_TYPES[boss.tipAnomaly];
+            if (!tipInfo) return null;
+            const verified = !!boss.tipVerified;
+            const isRed = !!boss.tipIsRed;
+            const tone = !verified ? 'amber'
+                       : isRed     ? 'red'
+                       :             'emerald';
+            const toneClasses = tone === 'amber'
+              ? 'bg-amber-950/30 border-amber-700/60 text-amber-200'
+              : tone === 'red'
+                ? 'bg-red-950/40 border-red-700/60 text-red-200'
+                : 'bg-emerald-950/40 border-emerald-700/60 text-emerald-200';
+            const badgeText = !verified ? 'ISO TIP · Unverified'
+                           : isRed     ? 'ISO TIP · BUSTED'
+                           :             'ISO TIP · CONFIRMED';
+            const TipIcon = !verified ? AlertTriangle : isRed ? X : Check;
+            return (
+              <div className={`mb-3 rounded-xl border-2 p-3 ${toneClasses}`}>
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <TipIcon size={14} />
+                    <span className="text-[10px] uppercase font-black tracking-widest">{badgeText}</span>
+                  </div>
+                  {!verified && (
+                    <span className="text-[9px] uppercase tracking-widest font-bold opacity-70">
+                      Run Forensic to verify
+                    </span>
+                  )}
+                </div>
+                <div className="text-sm font-black text-white tracking-tight mb-0.5">{tipInfo.label}</div>
+                <div className="text-[11px] leading-snug opacity-90">
+                  {!verified
+                    ? `Boiler Room ISO claims this anomaly is the issue. Trust the tip and submit for +$300 commission — or run Forensic to verify the source.`
+                    : isRed
+                      ? `Tipper was lying. The actual anomalies tell a different story.`
+                      : `Tipper was straight. The anomaly checks out.`
+                  }
+                </div>
+              </div>
+            );
+          })()}
 
           {/* HP bar + intent telegraph + file block */}
           {boss.maxHp != null && (
