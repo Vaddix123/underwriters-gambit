@@ -445,7 +445,7 @@ const BASIC_CARDS = [
 const SIGNATURE_CARDS = [
   { id: 's_branden', name: 'Game Plan', type: 'UTILITY', energy: 1, mod: { factor: +0.02, risk: -5 }, draw: 1,
     desc: '+0.02 Factor, -5 Risk. Draw 1.', icon: ListChecks, color: CC_DEFENSIVE,
-    tooltip: "Branden's signature. The Strategist's opening move — small spread, small risk-trim, fresh card to keep options open. Plan two moves ahead instead of swinging at the first thing in hand." },
+    tooltip: "Branden's signature. The Strategist opening — small spread, small risk-trim, fresh card to keep options open. Plan two moves ahead instead of swinging at the first thing in hand." },
   { id: 's_stanley', name: 'Side Hustle', type: 'UTILITY', energy: 0, bonus: 300, draw: 1,
     desc: '+$300 commission. Draw 1.', icon: DollarSign, color: CC_TEMPO,
     tooltip: "Stanley's signature. Spin up a side commission off-book — broker bonus, referral fee, whatever. Free money plus a card for the next play." },
@@ -982,27 +982,30 @@ const ALEXANDER_POOL = [
 // `keyword` is the class's mechanical identity — surfaces as a bold colored token on cards
 // from this pool that lean into it, and shows up on character select.
 const UNDERWRITERS = [
-  { id: 'branden',  name: 'Branden',  title: 'The Strategist',
+  // Titles dropped "The" prefix — single-word titles fit cleaner in tight UI columns
+  // (encounter HUD, intermission header). Convention matches StS class names + Hades
+  // character titles. Keyword stays as the mechanical tag separate from the title.
+  { id: 'branden',  name: 'Branden',  title: 'Strategist',
     keyword: 'Hedge',     keywordDesc: 'Hybrid mods that move both Risk and Factor reward you twice. Balance is the play.',
     blurb: 'Planner. Hybrid offense/defense modifiers, scaling reads, steady compounding gains. The desk that ages well.',
     accent: 'indigo', signatureId: 's_branden',  pool: BRANDEN_POOL  },
-  { id: 'brendan',  name: 'Brendan',  title: 'The Forensic',
+  { id: 'brendan',  name: 'Brendan',  title: 'Forensic',
     keyword: 'Forensic',  keywordDesc: 'Cards gain power for every visible anomaly. Read the file, then price it.',
     blurb: 'Information advantage. Reveal-heavy deck, scaling defenses on visible attrs, anomaly synergy.',
     accent: 'purple', signatureId: 's_brendan',  pool: BRENDAN_POOL  },
-  { id: 'keith',    name: 'Keith',    title: 'The Veteran',
+  { id: 'keith',    name: 'Keith',    title: 'Veteran',
     keyword: 'Walk',      keywordDesc: 'Decline carries a Clean File buff (−15 Risk) onto the next encounter. Walking is a play.',
     blurb: 'Risk-averse. Heavy defensive structuring, decline-with-bonus economy, situational bonuses against bad ISOs.',
     accent: 'slate',  signatureId: 's_keith',    pool: KEITH_POOL    },
-  { id: 'isaac',    name: 'Isaac',    title: 'The Closer',
+  { id: 'isaac',    name: 'Isaac',    title: 'Closer',
     keyword: 'Yield',     keywordDesc: 'Bigger profit on cleared files (+15%), but Capital damage hits +25% harder. Glass cannon.',
     blurb: 'Yield pump. Heavy factor stacking, conditional spreads at the state cap, push-for-renewal economics.',
     accent: 'red',    signatureId: 's_isaac',    pool: ISAAC_POOL    },
-  { id: 'alexander',name: 'Alexander',title: 'The Stacker',
+  { id: 'alexander',name: 'Alexander',title: 'Stacker',
     keyword: 'Chain',     keywordDesc: 'After 3+ cards played in a turn, the next mod doubles its Risk reduction. Build the combo.',
     blurb: 'Combo / tempo. Cheap E0 cards, draw-heavy chains, modifiers that scale with the stack.',
     accent: 'cyan',   signatureId: 's_alexander',pool: ALEXANDER_POOL},
-  { id: 'stanley',  name: 'Stanley',  title: 'The Hustler',
+  { id: 'stanley',  name: 'Stanley',  title: 'Hustler',
     keyword: 'Kickback',  keywordDesc: 'Card commission bonuses still pay on Decline. Walking away is never empty-handed.',
     blurb: 'Commission-grabber. Cards earn cash on the side, declines pay, side gigs and broker kickbacks compound your shop budget.',
     accent: 'amber',  signatureId: 's_stanley',  pool: STANLEY_POOL  },
@@ -1494,6 +1497,89 @@ function appendRunHistory(run) {
 }
 function clearRunHistory() {
   try { localStorage.removeItem(RUN_HISTORY_KEY); } catch (e) {}
+}
+
+// === (Fix F8) Meta-Progression Mirror ====================================================
+// Cross-run unlock tree. 5 unlock conditions track against runHistory + per-run telemetry.
+// Two unlocks have mechanical perks at run start (leverage_warning, veteran_underwriter);
+// three are flavor-tier for MVP and can grow into deeper effects in F8.5.
+// Retires symptom 14 (no persistent meta-progression) — last non-art-blocked symptom on
+// the original 20-point list.
+const UNLOCKS_KEY = 'uw_unlocks';
+function loadUnlocks() {
+  try {
+    const raw = localStorage.getItem(UNLOCKS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) { return []; }
+}
+function saveUnlocks(arr) {
+  try { localStorage.setItem(UNLOCKS_KEY, JSON.stringify(arr)); } catch (e) {}
+}
+
+// Each unlock: { id, name, desc, perk, requirement(history, latestRun) → { met: bool, progress: '12/20' } }
+const UNLOCKS = [
+  {
+    id: 'pillow_slayer',
+    name: 'Pillow Slayer',
+    desc: 'Beat the Pillow Tycoon on Day 10.',
+    perk: 'Cosmetic — proven Day-10 underwriter',
+    requirement: (history, latest) => {
+      const wins = history.filter((r) => r.outcome === 'promoted' && r.beatFinalBoss).length;
+      return { met: wins >= 1, progress: `${Math.min(wins, 1)}/1 wins` };
+    },
+  },
+  {
+    id: 'leverage_warning',
+    name: 'Leverage Cap Warning',
+    desc: 'Default 5+ times to over-leverage across all runs.',
+    perk: 'Mechanical — TermSheetPanel highlights leverage row in red when violated.',
+    requirement: (history, latest) => {
+      const total = history.reduce((s, r) => s + (r.overLeverageDefaults || 0), 0);
+      return { met: total >= 5, progress: `${Math.min(total, 5)}/5 over-leverage defaults` };
+    },
+  },
+  {
+    id: 'veteran_underwriter',
+    name: 'Veteran Underwriter',
+    desc: 'Complete 5 total runs (any outcome).',
+    perk: 'Mechanical — start each run with 1 random consumable (Hot Tip).',
+    requirement: (history, latest) => {
+      const completed = history.length;
+      return { met: completed >= 5, progress: `${Math.min(completed, 5)}/5 runs` };
+    },
+  },
+  {
+    id: 'counter_specialist',
+    name: 'Counter Specialist',
+    desc: 'Defuse 20+ threats in a single run.',
+    perk: 'Cosmetic — threat-counter glow gets a brighter ring.',
+    requirement: (history, latest) => {
+      const max = history.reduce((m, r) => Math.max(m, r.threatsDefused || 0), 0);
+      return { met: max >= 20, progress: `${Math.min(max, 20)}/20 in best run` };
+    },
+  },
+  {
+    id: 'tipper_database',
+    name: 'Tipper Database',
+    desc: 'Clear 3+ scam files in a single run.',
+    perk: 'Cosmetic — proven scam-tip reader.',
+    requirement: (history, latest) => {
+      const max = history.reduce((m, r) => Math.max(m, r.scamsCleared || 0), 0);
+      return { met: max >= 3, progress: `${Math.min(max, 3)}/3 in best run` };
+    },
+  },
+];
+function checkUnlocks(history, latest, currentUnlocked) {
+  const owned = new Set(currentUnlocked || []);
+  const newly = [];
+  for (const u of UNLOCKS) {
+    if (owned.has(u.id)) continue;
+    const { met } = u.requirement(history, latest);
+    if (met) newly.push(u.id);
+  }
+  return newly;
 }
 
 function getCardTier(card) {
@@ -2102,14 +2188,14 @@ function HelpModal({ onClose }) {
 
           <section>
             <h3 className="font-black uppercase tracking-widest text-emerald-400 text-xs mb-2">Underwriters &amp; Decks</h3>
-            <p className="text-neutral-400 text-xs mb-2">Each run starts with a 9-card deck: 5× <span className="text-red-300 font-bold">Push Rate</span> (+0.03 Factor) + 3× <span className="text-emerald-300 font-bold">Tighten Up</span> (−8 Risk) + your underwriter's signature. After each cleared file you draft 1 of 3 cards from a 25-card pool unique to your underwriter.</p>
+            <p className="text-neutral-400 text-xs mb-2">Each run starts with a 9-card deck: 5× <span className="text-red-300 font-bold">Push Rate</span> (+0.03 Factor) + 3× <span className="text-emerald-300 font-bold">Tighten Up</span> (−8 Risk) + your underwriter's signature. After each cleared file you draft 2 of 5 cards from a 25-card pool unique to your underwriter.</p>
             <ul className="space-y-1 text-xs">
-              <li><span className="text-indigo-300 font-bold">Branden — The Strategist</span>: planner, hybrid offense/defense modifiers, scaling reads, steady compounding gains.</li>
-              <li><span className="text-purple-300 font-bold">Brendan — The Forensic</span>: reveal-heavy, anomaly synergy, scaling defenses on visible attrs.</li>
-              <li><span className="text-slate-300 font-bold">Keith — The Veteran</span>: defensive structuring, decline-with-bonus, situational ISO/state bonuses.</li>
-              <li><span className="text-red-300 font-bold">Isaac — The Closer</span>: yield pump, factor stacking at the cap, push-for-renewal economics.</li>
-              <li><span className="text-cyan-300 font-bold">Alexander — The Stacker</span>: cheap E0 cards, draw chains, modifiers that scale with stack depth.</li>
-              <li><span className="text-amber-300 font-bold">Stanley — The Hustler</span>: cards earn commission on the side, declines pay, broker kickbacks compound your shop budget.</li>
+              <li><span className="text-indigo-300 font-bold">Branden — Strategist</span>: planner, hybrid offense/defense modifiers, scaling reads, steady compounding gains.</li>
+              <li><span className="text-purple-300 font-bold">Brendan — Forensic</span>: reveal-heavy, anomaly synergy, scaling defenses on visible attrs.</li>
+              <li><span className="text-slate-300 font-bold">Keith — Veteran</span>: defensive structuring, decline-with-bonus, situational ISO/state bonuses.</li>
+              <li><span className="text-red-300 font-bold">Isaac — Closer</span>: yield pump, factor stacking at the cap, push-for-renewal economics.</li>
+              <li><span className="text-cyan-300 font-bold">Alexander — Stacker</span>: cheap E0 cards, draw chains, modifiers that scale with stack depth.</li>
+              <li><span className="text-amber-300 font-bold">Stanley — Hustler</span>: cards earn commission on the side, declines pay, broker kickbacks compound your shop budget.</li>
             </ul>
           </section>
 
@@ -2731,6 +2817,13 @@ function UnderwritersGambit() {
   const [scamFileAvailable, setScamFileAvailable] = useState(false);
   // Per-run counters surfaced on the Profile screen after a run ends.
   const [runStats, setRunStats] = useState({ cleared: 0, defaulted: 0, declined: 0 });
+  // (Fix F8) Persistent unlock state — loaded from localStorage on mount, written back when
+  // new unlocks are earned. unlocks is a Set-like array of unlock IDs.
+  const [unlocks, setUnlocks] = useState(() => loadUnlocks());
+  // Per-run metrics for unlock conditions. Reset on run start, captured into run summary
+  // on run end. threatsDefused increments when a counter card is played; scamsCleared when
+  // a scam file clears; overLeverageDefaults when a default cause is over_leverage.
+  const [perRunMetrics, setPerRunMetrics] = useState({ threatsDefused: 0, scamsCleared: 0, overLeverageDefaults: 0, beatFinalBoss: false });
   // Walk keyword (Keith): a Decline stamps a Clean File buff onto the next encounter (-N Risk).
   // Carries through one encounter, applied + cleared in startEncounter.
   const [cleanFileBuff, setCleanFileBuff] = useState(0);
@@ -2799,7 +2892,7 @@ function UnderwritersGambit() {
     const key = `${selectedUnderwriter}|${day}|${capital}|${commission}`;
     if (runSavedRef.current === key) return;
     runSavedRef.current = key;
-    appendRunHistory({
+    const runRecord = {
       id: 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
       ts: Date.now(),
       underwriter: selectedUnderwriter,
@@ -2812,8 +2905,23 @@ function UnderwritersGambit() {
       declined: runStats.declined,
       relics: relics.length,
       deckSize: deck.length,
-    });
-  }, [gameState, selectedUnderwriter, day, capital, commission, runStats, relics, deck]);
+      // (Fix F8) per-run metrics for unlock conditions
+      threatsDefused: perRunMetrics.threatsDefused,
+      scamsCleared: perRunMetrics.scamsCleared,
+      overLeverageDefaults: perRunMetrics.overLeverageDefaults,
+      beatFinalBoss: perRunMetrics.beatFinalBoss,
+    };
+    appendRunHistory(runRecord);
+    // (Fix F8) Check unlocks against the just-saved history. Newly earned IDs persist
+    // immediately so they're available on next run start.
+    const updatedHistory = loadRunHistory();
+    const newlyEarned = checkUnlocks(updatedHistory, runRecord, unlocks);
+    if (newlyEarned.length > 0) {
+      const merged = [...unlocks, ...newlyEarned];
+      setUnlocks(merged);
+      saveUnlocks(merged);
+    }
+  }, [gameState, selectedUnderwriter, day, capital, commission, runStats, relics, deck, perRunMetrics, unlocks]);
 
   // === Audio system ===
   // One imperatively-managed Audio element. Track is chosen by gameState; loops while on screen.
@@ -2922,11 +3030,21 @@ function UnderwritersGambit() {
     setHand([]);
     setDiscardPile([]);
     setRelics([]);
-    setConsumables([]);
+    // (Fix F8) Veteran Underwriter perk — start each run with 1 random consumable when
+    // the unlock is owned. Picked at run-start; player can deploy it from Broker Row's
+    // intermission as normal.
+    if (unlocks.includes('veteran_underwriter') && CONSUMABLE_POOL.length > 0) {
+      const starter = CONSUMABLE_POOL[Math.floor(Math.random() * CONSUMABLE_POOL.length)];
+      setConsumables([{ ...starter }]);
+    } else {
+      setConsumables([]);
+    }
     setPendingConsumables([]);
     setLastClearedDeal(null);
     setClearedDeals([]);
     setRunStats({ cleared: 0, defaulted: 0, declined: 0 });
+    // (Fix F8) Reset per-run unlock metrics on run start
+    setPerRunMetrics({ threatsDefused: 0, scamsCleared: 0, overLeverageDefaults: 0, beatFinalBoss: false });
     setCleanFileBuff(0);
     setCardsPlayedThisTurn(0);
     setLastOutcome(null);
@@ -3095,6 +3213,8 @@ function UnderwritersGambit() {
 
     if (willDefuseThreat) {
       setBoss((b) => b ? { ...b, threatDefused: true } : b);
+      // (Fix F8) Track defuses for the Counter Specialist unlock (20+ in a run)
+      setPerRunMetrics((m) => ({ ...m, threatsDefused: m.threatsDefused + 1 }));
     }
 
     // (Fix F6) Reveal Toolkit — Reveal cards push a -3 Risk modifier into activeMods on
@@ -3377,6 +3497,11 @@ function UnderwritersGambit() {
       threshold,
     );
 
+    // (Fix F8) Track over-leverage defaults for Leverage Cap Warning unlock (5+ across runs)
+    if (!isCleared && cause && cause.headline === 'Over-Leverage Cap Exceeded') {
+      setPerRunMetrics((m) => ({ ...m, overLeverageDefaults: m.overLeverageDefaults + 1 }));
+    }
+
     setLastOutcome({
       type: bandName.toUpperCase().replace(/ /g, '_'),
       bandName,
@@ -3541,6 +3666,12 @@ function UnderwritersGambit() {
         const trustBonusFinal = selectedUnderwriter === 'stanley' ? Math.floor(trustBonus * 1.5) : trustBonus;
         setCommission((c) => c + trustBonusFinal);
       }
+      // (Fix F8) Track scam clears for the Tipper Database unlock (3+ in a run)
+      setPerRunMetrics((m) => ({ ...m, scamsCleared: m.scamsCleared + 1 }));
+    }
+    // (Fix F8) Track final-boss win for the Pillow Slayer unlock
+    if (cleared && wasFinal) {
+      setPerRunMetrics((m) => ({ ...m, beatFinalBoss: true }));
     }
 
     // (Fix F6) Multi-pick draft. Pool size + pick count + rare guarantees scale by encounter
@@ -4182,6 +4313,48 @@ function UnderwritersGambit() {
                       <div className="text-[10px] font-mono text-neutral-400 hidden sm:block w-16 text-right">Day {r.daysSurvived}</div>
                       <div className="text-[10px] font-mono text-amber-400 hidden sm:block w-20 text-right">{formatMoney(r.commission)}</div>
                       <div className={`text-[10px] font-black uppercase tracking-widest w-16 text-right ${isWin ? 'text-emerald-400' : 'text-red-400'}`}>{isWin ? 'VP' : 'WIPED'}</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* (Fix F8) Mirror — cross-run unlock tree. Each entry shows lock state +
+                  progress against requirement. Mechanical perks active automatically once
+                  unlocked; cosmetic ones are recognition tier. */}
+              <h2 className="text-xs uppercase font-black tracking-widest text-neutral-400 mb-2 mt-6 flex items-center gap-2">
+                <Award size={12} className="text-amber-500" /> Mirror — Cross-Run Unlocks
+                <span className="text-[10px] tracking-normal font-mono normal-case text-neutral-500">
+                  ({unlocks.length} / {UNLOCKS.length})
+                </span>
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-6">
+                {UNLOCKS.map((u) => {
+                  const owned = unlocks.includes(u.id);
+                  const { progress } = u.requirement(history, history[history.length - 1] || null);
+                  return (
+                    <div key={u.id}
+                         className={`p-3 rounded-lg border-2 ${
+                           owned
+                             ? 'bg-amber-950/20 border-amber-700/50'
+                             : 'bg-neutral-900 border-neutral-800'
+                         }`}>
+                      <div className="flex items-baseline justify-between mb-1.5">
+                        <span className={`text-sm font-black uppercase tracking-tight ${owned ? 'text-amber-200' : 'text-neutral-400'}`}>
+                          {owned ? '★ ' : '🔒 '}{u.name}
+                        </span>
+                        <span className={`text-[9px] uppercase font-bold tracking-widest ${owned ? 'text-amber-500' : 'text-neutral-600'}`}>
+                          {owned ? 'Unlocked' : 'Locked'}
+                        </span>
+                      </div>
+                      <div className={`text-[11px] leading-snug mb-1.5 ${owned ? 'text-amber-100' : 'text-neutral-500'}`}>
+                        {u.desc}
+                      </div>
+                      <div className={`text-[10px] font-mono ${owned ? 'text-emerald-400' : 'text-neutral-600'}`}>
+                        {progress}
+                      </div>
+                      <div className={`text-[10px] mt-1.5 pt-1.5 border-t ${owned ? 'border-amber-900/50 text-amber-300' : 'border-neutral-800 text-neutral-600'}`}>
+                        {u.perk}
+                      </div>
                     </div>
                   );
                 })}
