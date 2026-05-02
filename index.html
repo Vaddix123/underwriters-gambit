@@ -1451,6 +1451,13 @@ function pickNextIntent(abilities) {
 // Boss days fall on day 3, 6, 9 — escalating difficulty + reward beats. Day 10 is the FINAL boss.
 const BOSS_DAYS = [3, 6, 9];
 const FINAL_BOSS_DAY = 10;
+// Each day is now a chain of FILES_PER_DAY regular new files culminating in a boss
+// fight as file FILES_PER_DAY+1. Renewal-boss generation is gated to the boss-file slot
+// only (was incorrectly firing on every Day 2-9 file before, making the run feel like a
+// nonstop boss gauntlet). User spec: "10 files to go through and then the 11th is the
+// boss fight."
+const FILES_PER_DAY = 10;
+const BOSS_FILE_INDEX = FILES_PER_DAY + 1;
 const isBossDay = (day) => BOSS_DAYS.includes(day) || day === FINAL_BOSS_DAY;
 const isFinalBossDay = (day) => day === FINAL_BOSS_DAY;
 
@@ -1617,7 +1624,10 @@ const BOSS_FLAVORS = [
 // Day 3/6/9 = mini-bosses (2.1× HP, 5 turns). Day 10 = final boss "Mike Lindel" (3.2× HP, 7 turns,
 // hand-curated ability kit including infomercial-push HP regen and BOGO anomaly amp).
 function attachCombatStats(file, day, isBoss) {
-  const isFinal = isFinalBossDay(day);
+  // (Day-flow restructure) Final-boss flag must require BOTH Day 10 AND boss-slot
+  // — otherwise files 1-10 of Day 10 would also be flagged as final-boss, triggering
+  // GAMEOVER + final-reward draft after every regular Day 10 file.
+  const isFinal = isFinalBossDay(day) && isBoss;
   const isoBump = file.iso.tier === 'Boiler Room' ? 18
                  : file.iso.tier === 'Aggressive' ? 10
                  : file.iso.tier === 'Standard'   ? 0
@@ -1974,15 +1984,23 @@ function generateScamFile(day, clearedDeals) {
   return attachCombatStats(file, day, true);
 }
 
-function generateFile(day, lastClearedDeal, hasReloadDesk, forcedPremier, clearedDeals) {
-  const onBossDay = isBossDay(day);
+function generateFile(day, lastClearedDeal, hasReloadDesk, forcedPremier, clearedDeals, fileInDay) {
   const onFinalBossDay = isFinalBossDay(day);
-  // Day 2-9: if you've cleared anything before, today's file is a renewal-boss of one of those merchants.
-  // This makes every choice carry weight — the merchants you funded come back, deteriorated.
-  if (!onFinalBossDay && day >= 2 && day <= 9 && clearedDeals && clearedDeals.length > 0) {
+  // Each day is FILES_PER_DAY regular new files culminating in a boss-file. Renewal-boss
+  // generation is gated to the boss slot only (file index BOSS_FILE_INDEX). Days 2-9 boss
+  // file is a renewal of a previously-cleared merchant; Day 1 boss is a regular boss-file
+  // (no renewal source); Day 10 boss is Pillow Tycoon (handled by the regular path with
+  // onFinalBossDay flagging in attachCombatStats).
+  const isBossSlot = (typeof fileInDay === 'number') && fileInDay >= BOSS_FILE_INDEX;
+  if (isBossSlot && !onFinalBossDay && day >= 2 && day <= 9 && clearedDeals && clearedDeals.length > 0) {
     const source = clearedDeals[Math.floor(Math.random() * clearedDeals.length)];
     return generateRenewalBoss(source, day);
   }
+  // Treat the boss slot as a "boss day" for the regular-file path so attachCombatStats
+  // upgrades it to boss-tier HP / abilities / music. With the day-flow restructure, the
+  // BOSS_DAYS constant is no longer relevant — every day's last file is the boss, every
+  // day's files 1-FILES_PER_DAY are regular. Boss-tier flagging is now purely fileInDay.
+  const onBossDay = isBossSlot;
   // Otherwise fall through to the original renewal/random-fresh flow (handles day 1 and the no-clears edge case).
   const renewChance = hasReloadDesk ? 0.28 : 0.18;
   if (!onBossDay && lastClearedDeal && day >= 2 && Math.random() < renewChance) {
@@ -2034,19 +2052,22 @@ function generateFile(day, lastClearedDeal, hasReloadDesk, forcedPremier, cleare
     return attachCombatStats(renewalFile, day, false);
   }
 
-  // Day 10 is locked to a Retail file (the pillow merchant) and a non-Premier ISO so the final
-  // boss feels like the volume-retail subprime arc — bypasses forcedPremier on final-boss day.
-  const industry = onFinalBossDay
+  // Day 10 BOSS file is locked to Retail + Aggressive ISO + $90-120K request (the pillow
+  // merchant) so the final boss feels like the volume-retail subprime arc. (Day-flow
+  // restructure: gates flipped to the boss slot only — Day 10 files 1-FILES_PER_DAY are
+  // normal random files like every other day.)
+  const isFinalBossFile = onFinalBossDay && isBossSlot;
+  const industry = isFinalBossFile
     ? (INDUSTRIES.find((i) => i.id === 'retail') || INDUSTRIES[0])
     : INDUSTRIES[Math.floor(Math.random() * INDUSTRIES.length)];
   const state = STATES[Math.floor(Math.random() * STATES.length)];
-  const iso = onFinalBossDay
+  const iso = isFinalBossFile
     ? (ISOS.find((x) => x.tier === 'Aggressive') || ISOS[0])
     : forcedPremier
       ? ISOS.filter((x) => x.tier === 'Premier')[Math.floor(Math.random() * 2)]
       : ISOS[Math.floor(Math.random() * ISOS.length)];
 
-  const requested = onFinalBossDay
+  const requested = isFinalBossFile
     ? 90000 + Math.floor(Math.random() * 30000)  // boss file is a much bigger ticket
     : 8000 + Math.floor(Math.random() * (12000 + day * 4000));
 
@@ -2081,10 +2102,11 @@ function generateFile(day, lastClearedDeal, hasReloadDesk, forcedPremier, cleare
   const baseRisk = industry.baseRisk + dayDifficulty(day) + state.riskMod + iso.riskMod
     + fico.risk + tib.risk + positionRisk + bankRisk;
 
-  // (Fix F2) Pull a deduplicated merchant name. Day 10 final boss has its own identity
-  // ("The Pillow Tycoon — Sub-Prime Slumber Inc.") so we let that win when present.
+  // (Fix F2) Pull a deduplicated merchant name. Day 10's BOSS file gets the Pillow Tycoon
+  // identity; regular files 1-FILES_PER_DAY of Day 10 are normal merchants. (Day-flow
+  // restructure: the gate now requires the boss slot, not just Day 10.)
   const usedNames = new Set((clearedDeals || []).map((d) => d.merchantName).filter(Boolean));
-  const merchantName = onFinalBossDay
+  const merchantName = (onFinalBossDay && isBossSlot)
     ? 'The Pillow Tycoon — Sub-Prime Slumber Inc.'
     : pickMerchantName(industry, usedNames);
 
@@ -2815,6 +2837,10 @@ function UnderwritersGambit() {
   const [clearedDeals, setClearedDeals] = useState([]);
   // Optional scam-file mini-boss — rolled at intermission, surfaces an Investigate button.
   const [scamFileAvailable, setScamFileAvailable] = useState(false);
+  // (Day-flow restructure) Tracks which file of the current day the player is on.
+  // 1 → FILES_PER_DAY are regular files; FILES_PER_DAY+1 (BOSS_FILE_INDEX) is the boss
+  // file (renewal boss for Days 2-9, Pillow Tycoon on Day 10, regular boss on Day 1).
+  const [currentFileInDay, setCurrentFileInDay] = useState(1);
   // Per-run counters surfaced on the Profile screen after a run ends.
   const [runStats, setRunStats] = useState({ cleared: 0, defaulted: 0, declined: 0 });
   // (Fix F8) Persistent unlock state — loaded from localStorage on mount, written back when
@@ -2876,11 +2902,13 @@ function UnderwritersGambit() {
   const [selectedUnderwriter, setSelectedUnderwriter] = useState(null);
 
   // Roll scam-file availability whenever we land on the intermission screen.
-  // 30% from day 2 onward; cleared on commit so it doesn't carry stale into the next day.
+  // 5% per file-intermission from day 2 onward (was 30% pre-day-flow restructure when
+  // intermission only fired once per day; with FILES_PER_DAY+1 intermissions per day,
+  // 5% × 11 ≈ 50% expected per-day rate, matching the original feel).
   useEffect(() => {
     if (gameState !== 'INTERMISSION') return;
-    setScamFileAvailable(day >= 2 && day < FINAL_BOSS_DAY && Math.random() < 0.30);
-  }, [gameState, day]);
+    setScamFileAvailable(day >= 2 && day < FINAL_BOSS_DAY && Math.random() < 0.05);
+  }, [gameState, day, currentFileInDay]);
 
   // When a run ends, write a summary to localStorage for the Profile screen.
   // Guarded by selectedUnderwriter so the initial GAMEOVER from a fresh page (which shouldn't happen) doesn't write a phantom run.
@@ -3045,6 +3073,8 @@ function UnderwritersGambit() {
     setRunStats({ cleared: 0, defaulted: 0, declined: 0 });
     // (Fix F8) Reset per-run unlock metrics on run start
     setPerRunMetrics({ threatsDefused: 0, scamsCleared: 0, overLeverageDefaults: 0, beatFinalBoss: false });
+    // (Day-flow restructure) Reset file counter so first run encounter is file 1 of 10
+    setCurrentFileInDay(1);
     setCleanFileBuff(0);
     setCardsPlayedThisTurn(0);
     setLastOutcome(null);
@@ -3072,7 +3102,7 @@ function UnderwritersGambit() {
   const startEncounter = (overrideFile) => {
     const hasReload = relics.includes('r_renewal');
     const forcedPremier = pendingConsumables.some((c) => c.id === 'k_premium');
-    const newBoss = overrideFile || generateFile(day, lastClearedDeal, hasReload, forcedPremier, clearedDeals);
+    const newBoss = overrideFile || generateFile(day, lastClearedDeal, hasReload, forcedPremier, clearedDeals, currentFileInDay);
 
     // Apply consumables that affect this file
     let preActiveMods = [];
@@ -3724,13 +3754,26 @@ function UnderwritersGambit() {
     advanceDay();
   };
 
+  // (Day-flow restructure) Replaces the old single-file-per-day advanceDay. Now:
+  // - Files 1 → FILES_PER_DAY: increment file counter, return to INTERMISSION
+  // - File BOSS_FILE_INDEX (the boss): increment day, reset file counter to 1, return to
+  //   INTERMISSION. If we just cleared the FINAL_BOSS_DAY's boss, route to GAMEOVER instead.
   const advanceDay = () => {
-    if (day >= PROMOTION_DAY) {
-      setGameState('GAMEOVER');
-      return;
+    const justClearedBoss = currentFileInDay >= BOSS_FILE_INDEX;
+    if (justClearedBoss) {
+      // We just cleared the boss of day N. If that was the final-boss day, end the run.
+      if (day >= PROMOTION_DAY) {
+        setGameState('GAMEOVER');
+        return;
+      }
+      setDay((d) => d + 1);
+      setCurrentFileInDay(1);
+      setGameState('INTERMISSION');
+    } else {
+      // Mid-day file advancement — next file in the same day
+      setCurrentFileInDay((n) => n + 1);
+      setGameState('INTERMISSION');
     }
-    setDay((d) => d + 1);
-    setGameState('INTERMISSION');
   };
 
   // === Broker Row (ISO Shop) ===
@@ -4452,6 +4495,19 @@ function UnderwritersGambit() {
           <h2 className="text-2xl sm:text-3xl font-black uppercase tracking-tight text-white mb-6 text-center flex items-center justify-center gap-3">
             <Map className="text-emerald-500" /> Day {day} <span className="text-neutral-600 text-base font-bold">/ {PROMOTION_DAY}</span>
           </h2>
+          {/* (Day-flow restructure) File counter — shows where the player is in the day's
+              chain of 10 regular files + 1 boss. */}
+          <div className="text-center mb-4">
+            <span className={`inline-block px-3 py-1 rounded-full text-[10px] uppercase font-black tracking-widest border ${
+              currentFileInDay >= BOSS_FILE_INDEX
+                ? 'bg-red-950/40 border-red-700/60 text-red-300'
+                : 'bg-neutral-900 border-neutral-800 text-neutral-300'
+            }`}>
+              {currentFileInDay >= BOSS_FILE_INDEX
+                ? (day === FINAL_BOSS_DAY ? '★ Final Boss File' : '★ Boss File')
+                : `File ${currentFileInDay} / ${FILES_PER_DAY}`}
+            </span>
+          </div>
 
           <div className="grid grid-cols-2 gap-4 mb-6">
             <div className="bg-neutral-950 p-4 rounded-xl border border-neutral-800 flex flex-col items-center">
@@ -5064,7 +5120,7 @@ function UnderwritersGambit() {
         <div className="flex items-center gap-3 sm:gap-6">
           <div>
             <div className="text-[9px] font-bold text-neutral-500 uppercase tracking-widest flex items-center gap-1.5">
-              <Briefcase size={11} className="text-emerald-500" /> Fund / Day {day}
+              <Briefcase size={11} className="text-emerald-500" /> Fund / Day {day} {currentFileInDay >= BOSS_FILE_INDEX ? '· Boss' : `· File ${currentFileInDay}/${FILES_PER_DAY}`}
             </div>
             <div className="text-base sm:text-xl font-black text-white font-mono tracking-tight">{formatMoney(capital)}</div>
           </div>
