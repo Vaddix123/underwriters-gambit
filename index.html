@@ -291,6 +291,25 @@
   .synergy-active { box-shadow: 0 0 0 2px rgba(34,211,238,0.5), 0 0 10px 0 rgba(34,211,238,0.25); }
   .synergy-strong { animation: synergyPulse 1.4s ease-in-out infinite; }
   .live-needle    { transition: left 150ms cubic-bezier(0.4, 0, 0.2, 1); }
+
+  /* === FILE THREAT-CARD SYSTEM (Fix F4) ===
+     threatCounter: red ring on hand cards that would defuse the active threat right now.
+     Highest priority in the three-tier glow language: red (counter) > amber (strong synergy)
+     > cyan (active synergy). When a card is BOTH a counter AND a synergy, threat-counter wins.
+     defuseFlash: green flash overlay that fires when threat resolves to defused state.
+     defuseFade: opacity drop on the threat card after defuse. */
+  @keyframes threatPulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.0), 0 0 12px 0 rgba(239,68,68,0.0); }
+    50%      { box-shadow: 0 0 0 2px rgba(239,68,68,0.65), 0 0 18px 2px rgba(239,68,68,0.4); }
+  }
+  @keyframes defuseFlash {
+    0%   { background-color: rgba(16,185,129,0); }
+    30%  { background-color: rgba(16,185,129,0.35); }
+    100% { background-color: rgba(16,185,129,0); }
+  }
+  .threat-counter { animation: threatPulse 1.2s ease-in-out infinite; }
+  .threat-defused { opacity: 0.4; text-decoration: line-through; transition: opacity 350ms ease-out; }
+  .defuse-flash   { animation: defuseFlash 600ms ease-out; }
 </style>
 </head>
 <body>
@@ -396,6 +415,21 @@ const CC_AGGRO     = 'bg-red-900/40 border-red-500/50 text-red-300';
 const CC_FORENSIC  = 'bg-purple-900/40 border-purple-500/50 text-purple-300';
 const CC_TEMPO     = 'bg-amber-900/40 border-amber-500/50 text-amber-300';
 const CC_DECLINE   = 'bg-slate-900/40 border-slate-500/50 text-slate-300';
+
+// (Fix F4) Reverse map from CC_ color to a class label, used by the threat-counter system.
+// Cards declare their class via the color constant — getCardClass reads it back as a string
+// the Threat-Card system can match counterType against.
+const CARD_CLASS_BY_COLOR = {
+  [CC_REVEAL]:    'reveal',
+  [CC_DEFENSIVE]: 'defensive',
+  [CC_AGGRO]:     'aggro',
+  [CC_FORENSIC]:  'forensic',
+  [CC_TEMPO]:     'tempo',
+  [CC_DECLINE]:   'decline',
+};
+function getCardClass(card) {
+  return CARD_CLASS_BY_COLOR[card?.color] || 'unknown';
+}
 
 // === BASIC STARTER CARDS — every underwriter's opening 8 = 5 Push Rate + 3 Tighten Up ===
 const BASIC_CARDS = [
@@ -1231,6 +1265,49 @@ const FILE_ABILITIES = {
   legal_armor:     { name: 'Lawsuit Phase',    intent: 'block_self',  value: 18,   desc: 'Counter-suit posture. File gains 18 Block — the merchant lawyered up.', icon: 'Shield' },
   pillow_talk:     { name: 'Pillow Talk',      intent: 'rehide',      value: 1,    desc: 'Charm offensive. A revealed attribute slips back behind the curtain.', icon: 'EyeOff' },
 };
+
+// (Fix F4) Threat counter system — each FILE_ABILITY maps to a counter type; cards in hand
+// matching that counter type can defuse the threat by being played before file's turn ends.
+// Retires symptom 1 (combat is glorified spreadsheet review), 11 (intents telegraph but
+// don't demand counters), partial 12 (no fail-forward — defuse IS the second-chance).
+//
+// Counter taxonomy:
+//   forensic  — CC_FORENSIC card play (catches forged/hidden plays)
+//   defensive — CC_DEFENSIVE card play (blocks bleed/spike threats)
+//   reveal    — CC_REVEAL card play (re-exposes hidden info)
+//   decline   — CC_DECLINE card play (walking away IS the counter — defuses pressure)
+//   aggro     — any card dealing ≥8 damage to file (race the threat by burning HP)
+//   none      — unblockable; threat resolves no matter what (final boss kit for MVP)
+const ABILITY_COUNTERS = {
+  stacking_surge:   { counterType: 'aggro',     hint: 'Race: deal 8+ damage to defuse' },
+  nsf_spike:        { counterType: 'defensive', hint: 'Counter: play a Defensive card' },
+  forged_docs:      { counterType: 'forensic',  hint: 'Counter: play a Forensic card' },
+  broker_pressure:  { counterType: 'decline',   hint: 'Counter: Decline the file' },
+  cash_crisis:      { counterType: 'defensive', hint: 'Counter: play a Defensive card' },
+  hide_attribute:   { counterType: 'reveal',    hint: 'Counter: play a Reveal card' },
+  // Final-boss kit — unblockable in MVP. F4.5 will design bespoke counters per phase.
+  infomercial_push: { counterType: 'none',      hint: 'Unblockable — burn HP fast' },
+  subprime_slumber: { counterType: 'none',      hint: 'Unblockable — burn HP fast' },
+  bogo_free:        { counterType: 'none',      hint: 'Unblockable — burn HP fast' },
+  legal_armor:      { counterType: 'none',      hint: 'Unblockable — burn through' },
+  pillow_talk:      { counterType: 'none',      hint: 'Unblockable — re-reveal next turn' },
+};
+function getThreatCounter(intent) {
+  return ABILITY_COUNTERS[intent] || { counterType: 'none', hint: '' };
+}
+// Returns true if `card` would defuse the active threat on `boss` if played right now.
+// Used by the hand-card render (counter-glow) AND playCard (defuse trigger).
+function cardCountersThreat(card, boss) {
+  if (!card || !boss?.intent || boss?.threatDefused) return false;
+  const { counterType } = getThreatCounter(boss.intent);
+  if (counterType === 'none') return false;
+  const cardClass = getCardClass(card);
+  if (counterType === 'aggro') {
+    // Aggro counter = enough damage to race. Any class qualifies if damage threshold met.
+    return cardClass === 'aggro' || deriveCardDamage(card) >= 8;
+  }
+  return cardClass === counterType;
+}
 
 // Pick which abilities a file has. Boiler-Room/Aggressive ISOs get more, bosses get more again.
 function pickAbilitiesForFile(boss, isBoss) {
@@ -2861,12 +2938,21 @@ function UnderwritersGambit() {
       return;
     }
 
+    // (Fix F4) Threat-counter check — does this card defuse the file's active intent?
+    // Evaluated against the boss snapshot at play time. If yes, set boss.threatDefused so
+    // endTurn skips the threat effect. Visual feedback fires inside ThreatCard via the flag.
+    const willDefuseThreat = cardCountersThreat(card, boss);
+
     // Discard the card and spend energy
     const newHand = hand.filter((_, i) => i !== idx);
     setHand(newHand);
     setDiscardPile((d) => [...d, card]);
     setEnergy((e) => e - card.energy);
     setCardsPlayedThisTurn((n) => n + 1);
+
+    if (willDefuseThreat) {
+      setBoss((b) => b ? { ...b, threatDefused: true } : b);
+    }
 
     // Apply effects in order: reveals, modifiers, energy, draw, commission bonus, damage, block
     if (card.target) {
@@ -2913,8 +2999,10 @@ function UnderwritersGambit() {
     if (!boss || gameState !== 'ENCOUNTER') return;
     const fileAlive = boss.hp > 0;
 
-    // 1) File acts (only if alive)
-    if (fileAlive && boss.intent) {
+    // 1) File acts (only if alive AND threat wasn't defused this turn). (Fix F4)
+    //    threatDefused short-circuits the entire ability resolution — the merchant's
+    //    move was countered by the underwriter's tool BEFORE the file could act.
+    if (fileAlive && boss.intent && !boss.threatDefused) {
       const ability = FILE_ABILITIES[boss.intent];
       if (ability) {
         if (ability.intent === 'risk_up') {
@@ -2952,8 +3040,9 @@ function UnderwritersGambit() {
       });
     }
 
-    // 3) Pick next intent + reset file block (block doesn't carry between turns)
-    setBoss((b) => b ? ({ ...b, intent: pickNextIntent(b.abilities), block: 0 }) : b);
+    // 3) Pick next intent + reset file block + clear defuse flag (Fix F4 — fresh threat,
+    //    fresh defuse opportunity each turn). Block doesn't carry between turns.
+    setBoss((b) => b ? ({ ...b, intent: pickNextIntent(b.abilities), block: 0, threatDefused: false }) : b);
 
     // 4) Reset player block, discard hand, redraw, reset energy + per-turn counters
     setPlayerBlock(0);
@@ -4608,24 +4697,60 @@ function UnderwritersGambit() {
                      style={{ width: `${(boss.hp / boss.maxHp) * 100}%` }} />
               </div>
 
-              {/* Intent telegraph (file's next action) */}
+              {/* (Fix F4) Threat Card — replaces the old single-line intent strip.
+                  Card-shaped to visually parallel player hand cards (two-sided combat
+                  reads cleanly when both sides use the same visual language). Counter
+                  clause baked into the card itself so the player doesn't have to consult
+                  a help modal to know how to defuse. Defuse state strikes the card
+                  through and fades it. */}
               {boss.intent && boss.hp > 0 && (() => {
                 const ab = FILE_ABILITIES[boss.intent];
                 if (!ab) return null;
+                const counter = getThreatCounter(boss.intent);
+                const defused = !!boss.threatDefused;
                 const Ic = ab.intent === 'risk_up' || ab.intent === 'risk_dot' ? AlertTriangle
                   : ab.intent === 'block_self' ? Shield
                   : ab.intent === 'factor_down' ? TrendingDown
                   : ab.intent === 'rehide' ? EyeOff
+                  : ab.intent === 'heal' ? TrendingUp
                   : Activity;
-                const tone = ab.intent === 'block_self' ? 'border-blue-900/50 bg-blue-950/30 text-blue-300'
-                  : ab.intent === 'rehide' ? 'border-purple-900/50 bg-purple-950/30 text-purple-300'
-                  : 'border-red-900/50 bg-red-950/30 text-red-300';
+                const counterAccent =
+                    counter.counterType === 'forensic'  ? 'text-purple-300 border-purple-700/60'
+                  : counter.counterType === 'defensive' ? 'text-emerald-300 border-emerald-700/60'
+                  : counter.counterType === 'reveal'    ? 'text-blue-300 border-blue-700/60'
+                  : counter.counterType === 'decline'   ? 'text-slate-300 border-slate-600'
+                  : counter.counterType === 'aggro'     ? 'text-red-300 border-red-700/60'
+                  :                                       'text-neutral-500 border-neutral-700';
                 return (
-                  <div className={`mt-2 flex items-center gap-2 px-2 py-1.5 border rounded ${tone} text-[11px]`} title={ab.desc}>
-                    <Ic size={12} />
-                    <span className="font-bold uppercase tracking-widest">Intent:</span>
-                    <span className="font-mono">{ab.name}</span>
-                    <span className="text-neutral-500 text-[10px] truncate">— {ab.desc}</span>
+                  <div className={`mt-3 relative rounded-xl border-2 bg-red-950/20 p-3 ${defused ? 'threat-defused' : 'border-red-700/60'} ${defused ? 'border-emerald-700/40 defuse-flash' : ''}`}
+                       title={ab.desc}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-lg bg-red-950/60 border border-red-700/50 flex items-center justify-center">
+                          <Ic size={14} className={defused ? 'text-emerald-400' : 'text-red-400'} />
+                        </div>
+                        <div>
+                          <div className="text-[9px] uppercase font-bold tracking-widest text-red-500">
+                            {defused ? 'Defused this turn' : "File's Next Move"}
+                          </div>
+                          <div className="text-sm font-black uppercase tracking-tight text-white">{ab.name}</div>
+                        </div>
+                      </div>
+                      {defused && (
+                        <div className="text-[10px] uppercase font-black tracking-widest text-emerald-400">✓ Defused</div>
+                      )}
+                    </div>
+                    <div className="text-[11px] text-neutral-400 leading-snug mb-2">{ab.desc}</div>
+                    {!defused && counter.counterType !== 'none' && (
+                      <div className={`text-[10px] uppercase tracking-widest font-bold border-t pt-1.5 ${counterAccent}`}>
+                        {counter.hint}
+                      </div>
+                    )}
+                    {!defused && counter.counterType === 'none' && (
+                      <div className="text-[10px] uppercase tracking-widest font-bold border-t pt-1.5 text-neutral-500 border-neutral-700">
+                        Unblockable
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -4788,7 +4913,12 @@ function UnderwritersGambit() {
                 modCount: activeMods.length,
               } : null;
               const synergy = canPlay && synergyCtx ? evaluateCardSynergy(card, synergyCtx) : { active: false, strong: false };
-              const synergyClass = synergy.strong ? 'synergy-strong' : synergy.active ? 'synergy-active' : '';
+              // (Fix F4) Threat-counter wins over synergy — three-tier glow priority:
+              //   threat-counter (red pulse) > synergy-strong (amber pulse) > synergy-active (cyan ring).
+              //   When a card both counters AND synergizes, the counter signal is more
+              //   urgent (defuses NOW); synergy is "valuable later."
+              const isCounter = canPlay && cardCountersThreat(card, boss);
+              const synergyClass = isCounter ? 'threat-counter' : synergy.strong ? 'synergy-strong' : synergy.active ? 'synergy-active' : '';
               return (
                 <div key={card.uid} className="relative">
                   <button onClick={() => playCard(idx)} disabled={!canPlay}
